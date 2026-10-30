@@ -1,0 +1,36 @@
+[package]
+name = "nazca-spike-web"
+version = "0.0.0"
+edition = "2024"
+description = "The browser half of nazca's glow spike: a consumer crate, never published."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Its own workspace, outside geocore's: the browser binding is a consumer of
+# nazca, never part of it (../../wasm-plan.org).
+[workspace]
+
+[dependencies]
+nazca = { path = "..", features = ["gl"] }
+glow = "0.18.0"
+wasm-bindgen = "0.2.129"
+web-sys = { version = "0.3.106", features = [
+    "AddEventListenerOptions",
+    "Document",
+    "Element",
+    "Event",
+    "EventTarget",
+    "HtmlCanvasElement",
+    "MouseEvent",
+    "Node",
+    "WebGl2RenderingContext",
+    "WheelEvent",
+    "Window",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

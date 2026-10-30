@@ -1,0 +1,147 @@
+#+TITLE: Nazca
+#+AUTHOR: Daniel Okuniewicz Jr.
+#+DATE: {{{time(%Y-%m-%d)}}}
+#+EXPORT_FILENAME: project
+
+* Nazca
+
+** OVERVIEW
+Nazca is a rendering library optimized for geospatial data. It draws
+interactive maps and generates static layouts, and the two are equally
+important: one pipeline serves both, differing only in whether prepared
+geometry is cached and redrawn every frame or drawn once at print resolution.
+
+It is meant to be *lightweight, fast and memory-efficient*, to run the same
+natively and in WebAssembly, and to replace MapLibre GL as DuckMap's map
+client. The design is in [[file:plans/rendering.org][plans/rendering.org]].
+
+** SCOPE -- decided 2026-10-29 (user decisions)
+- *Interactive mapping and layouts are equally important.* Neither is a
+  by-product of the other.
+- *Nazca replaces MapLibre in DuckMap.* DuckMap's Views mode
+  (=DuckMap/ingestion/web/interactive_map.html=) runs on nazca instead of
+  MapLibre GL. The feature set that page uses today is nazca's first parity
+  target (plans/rendering.org § MAPLIBRE PARITY).
+- *Native is in scope*, not only the browser.
+- *Raster goes through the same tile cache as vector.*
+- *Globe view is wanted, after MapLibre parity.* v1 is designed so it is not
+  foreclosed (plans/rendering.org § GLOBE).
+- *Lightweight, fast, memory-efficient.* These are the deciding criteria
+  when two designs otherwise tie.
+- *Works best with =geosetta=, works with any I/O library.* Because there
+  are no dependency edges (§ ARCHITECTURE), "best with geosetta" cannot mean
+  a geosetta feature. It means geosetta's outputs (WKB, stored bboxes,
+  Hilbert-sorted FlatGeobuf) are the inputs nazca handles best.
+- *Dependencies are allowed.* Unlike its siblings, nazca does not have to be
+  standard-library only, because some of rendering (GPU access, rasterization,
+  glyphs) would be prohibitive to hand-write. See § DEPENDENCY POLICY.
+- *WebAssembly is a first-class target.*
+
+** WHAT NAZCA DOES NOT DO
+- *Reprojection.* Nazca applies camera transforms only: affine for flat maps,
+  perspective for a globe. Coordinates arrive in the map's CRS (geocentric
+  XYZ for a globe); projecting them is =geoscribe='s job, wired by the
+  caller. § CHARTER draws the line.
+- *I/O.* Nazca fetches nothing and reads no files. It names the tiles a
+  camera needs; the embedder fetches them (HTTP, Quack, a file, geosetta)
+  and hands the bytes in.
+- *Windows, event loops, DOM.* The embedder owns those and supplies a GL
+  context; nazca exposes a camera API the embedder's events call.
+- *Feature attributes.* Nazca holds geometry and a feature id, never
+  properties. A click returns =(layer, feature_id)=; the embedder looks up
+  the rest.
+- *Page layout.* Typst page composition stays in DuckMap. Nazca draws what
+  goes inside a map frame.
+
+** DEPENDENCY POLICY -- decided 2026-10-29 (user decision)
+External crates are allowed; sibling crates are not (that would be an edge,
+§ ARCHITECTURE).
+- *The default build is standard-library only*: WKB reading, the geometry
+  sink, preparation, the tile cache, the camera, hit-test bookkeeping, the
+  draw-command buffer and the SVG backend.
+- *Heavier parts sit behind features*: =gl= (=glow=), =raster= (=tiny-skia=),
+  =text= (a small glyph rasterizer such as =ab_glyph= or =fontdue=).
+- *=mvt= is a feature too, with no dependency*: a small hand-written decoder
+  for third-party MVT basemaps (plans/rendering.org § MAPLIBRE PARITY).
+- *Pure Rust only, no C build scripts.* DuckMap found =proj4rs-geodesic='s
+  =cc= build step breaks =wasm32-unknown-unknown= (=DuckMap/HANDOFF.org=
+  item 4). Any dependency must build for that target unmodified.
+- *=unsafe= only in the =gl= backend* (since 2026-10-29). Every =glow= call
+  is an =unsafe fn=, and =forbid(unsafe_code)= cannot be lifted for one
+  module, so the crate went from =forbid= to =deny= with =gl= alone allowed,
+  each block carrying a =SAFETY= comment. The default build still contains no
+  =unsafe=.
+
+** CHARTER -- decided 2026-10-29 (user decision)
+=geoscribe/project.org= § CHARTER claims all vector and raster math. Rendering
+needs render-time forms of some of it, and nazca cannot reach =geoscribe= to
+get them, so the charter carves them out the same way it carves out what
+=geosetta='s formats need. Two questions, asked in order:
+
+1. *Does it need to know the CRS?* Then it belongs to =geoscribe=, always,
+   even when the result is only displayed.
+2. *Is its result handed back to the caller as geometry or raster data?* Then
+   it belongs to =geoscribe=. If it only ever becomes pixels, GPU buffers or a
+   screen-space answer, it belongs to nazca.
+
+| Operation | Owner | Why |
+|-----------+-------+-----|
+| Same-pixel decimation, viewport clipping, tile covering | nazca | becomes GPU buffers |
+| Polygon triangulation, line expansion | nazca | becomes GPU buffers |
+| Raster colormapping, compositing | nazca | becomes pixels |
+| Label placement and collision | nazca | becomes pixels |
+| Picking the feature under the cursor | nazca | a screen-space answer (a feature id) |
+| Hillshade as a shader effect | nazca | becomes pixels |
+| Perspective camera (3D matrix) | nazca | camera math, no CRS |
+| Raster warping, even only for display | =geoscribe= | needs the CRS |
+| Geocentric XYZ for a globe, edge densification | =geoscribe= | needs the CRS |
+| Meters per pixel, grid convergence (scale bar, north arrow) | =geoscribe= | needs the CRS; nazca draws the result |
+| Simplifying or resampling a dataset to keep, hillshade as a dataset | =geoscribe= | returned as data |
+
+/A first proposal, "does the result depend on the output device's
+resolution?", was rejected the same day: it put triangulation and
+colormapping in =geoscribe= and display-only warping in nazca./
+
+The cost is deliberate duplication: nazca's same-pixel decimation is not
+=geoscribe='s simplification. A layout wanting real generalization has the
+caller run =geoscribe='s and hand nazca the result.
+
+** HISTORY -- the reprojection crate it was planned as
+Until 2026-10-22 Nazca was scoped as the ecosystem's reprojection crate:
+projection math, datum shift and transformed bounds, behind a =CrsRegistry=
+trait that callers implemented because the crate held no CRS data of its own.
+Nothing of it was implemented.
+
+On 2026-10-22 (user decision) reprojection, and vector/raster math generally,
+moved to =geoscribe=, which already holds the CRS database the math needs. The
+plans moved too, with their content intact:
+- [[file:../geoscribe/plans/reprojection.org][geoscribe/plans/reprojection.org]]
+- [[file:../geoscribe/plans/transform-bounds.org][geoscribe/plans/transform-bounds.org]]
+
+So did this file's =CHARTER= section, the falsifiable test for which math
+belongs where. It is now =geoscribe/project.org= § CHARTER. The old version of
+this file is not in any git history (=nazca/= is untracked); the charter text
+survives there, and the reprojection roadmap survives in geoscribe's
+=plans/todo.org=.
+
+On 2026-10-29 the rendering scope above was written down.
+
+** ARCHITECTURE
+A peer of =geosetta= and =geoscribe=, with no dependency edges in either
+direction ([[file:../architecture.org][../architecture.org]] § THE
+COMPOSITION MODEL). Whatever Nazca renders, it reaches the other two through a
+caller that links them or through a pipe between CLIs, never through a
+=Cargo.toml= dependency. External crates (§ DEPENDENCY POLICY) do not create
+such an edge.
+
+A browser binding (=wasm-bindgen=) belongs in a separate consumer crate, not
+as a =cdylib= inside nazca ([[file:../wasm-plan.org][../wasm-plan.org]]). In
+practice that consumer is DuckMap.
+
+** STATUS
+Scope written 2026-10-29. Implemented: v1 slice steps 1 and 2 -- the =Sink=
+trait, the streaming WKB reader, the tile grid, and prepare (snapping,
+clipping, earcut) -- and the =glow= spike drawing counties natively and in a
+browser (plans/rendering.org § V1 SLICE). See
+[[file:plans/rendering.org][plans/rendering.org]] and
+[[file:plans/todo.org][plans/todo.org]].

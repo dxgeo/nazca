@@ -1,0 +1,350 @@
+#+TITLE: Plan: Rendering Pipeline
+#+AUTHOR: Daniel Okuniewicz Jr.
+#+DATE: {{{time(%Y-%m-%d)}}}
+
+* Rendering Pipeline
+
+** STATUS -- DESIGN ONLY, NOT YET IMPLEMENTED
+Written 2026-10-29 from a brainstorming session. The scope it serves
+(interactive and layouts equally, replacing MapLibre in DuckMap, native in
+scope, raster through the tile cache, a globe after parity) is user-decided
+and recorded in [[file:../project.org][../project.org]] § SCOPE. So is the
+boundary with =geoscribe= ([[file:../project.org][../project.org]] § CHARTER). Everything in this file is a
+*proposal* unless a section says otherwise; § OPEN QUESTIONS lists what still
+needs a decision.
+
+** THE PIPELINE
+Two stages, so an interactive frame never repeats expensive work:
+
+#+begin_src text
+ prepare (slow, once per tile and level)       draw (fast, every frame)
+ ---------------------------------------       ------------------------
+ WKB / sink -> cull -> decimate -> clip    ->  [prepared tile]  -> camera transform -> backend
+            -> tessellate -> style index        cached (LRU,        (a uniform on GPU)
+                                                byte budget)
+#+end_src
+
+- *Layouts are the same pipeline with one view and no cache.* The device
+  resolution (screen pixels, or print DPI) sets the decimation tolerance, so a
+  300 DPI print keeps more vertices than the screen view of the same data.
+- *Nazca never holds a feature collection.* Geometry streams through prepare;
+  peak working memory is about one geometry plus the output buffers.
+
+** INPUT
+Two entry points, both borrowing rather than owning:
+
+- *WKB bytes (=&[u8]=).* An external spec, so it is the geometry analogue of
+  =architecture.org='s Rule 1. =geosetta= writes it (=geometry/wkb.rs=), DuckDB
+  emits it (=ST_AsWKB=), and GeoParquet and GeoPackage store it. Nazca reads it
+  in place without building a geometry tree (=src/wkb.rs=, implemented
+  2026-10-29).
+  /Corrected 2026-10-29: this said nazca "can read a geometry's bbox before
+  decoding the rest". WKB stores no bbox; finding one means reading every
+  coordinate. Culling before decoding needs a bbox the source already stores
+  (§ PREPARE)./
+- *The =Sink= trait* (=src/sink.rs=: =point=, =points(&[[f64; 2]])=, and
+  begin/end events for lines, polygons and rings) for every other source: =geo-types=, GeoArrow buffers, or
+  =geosetta='s =for_each_position_run= driven by a caller in a few lines. Same
+  pattern as the retired =CrsRegistry= trait: name the capability, not the
+  provider.
+
+Coordinates arrive in the map's CRS, or as geocentric XYZ for a globe
+(§ GLOBE). Nazca applies camera transforms only.
+
+The sink is *generic, not =dyn=*. A caller that projects through =geoscribe=
+inside its sink gets that projection inlined into nazca's prepare loop (the
+workspace builds release with =lto = true=), so the crate boundary costs one
+fused pass, not two passes and an intermediate buffer.
+
+** TILE GRIDS
+A tile grid is an origin plus a resolution per zoom level, in map units.
+XYZ Web Mercator is one instance; any projected CRS can define its own. This
+lets interactive views use a per-view CRS the way DuckMap's layout panes
+already do, which MapLibre cannot.
+
+- Prepared buffers are stored in *tile-local f32 coordinates*, which avoids
+  the precision jitter of f32 world coordinates at street level. The camera
+  transform is applied at draw time, so pan, zoom and rotate between
+  levels of detail need no re-preparation.
+- Raster tiles published in Web Mercator shown in another CRS need warping,
+  which is =geoscribe='s (its § CHARTER: raster warping). See § RASTER for
+  how that stays cheap.
+- *Tile selection is behind a trait.* v1 ships the flat XYZ implementation;
+  a globe selector (§ GLOBE) plugs in later. A tile's extent in device space
+  comes from the grid's CRS, so non-trivial grids are implemented by the
+  caller over =geoscribe=.
+
+/Implemented 2026-10-29 (=src/grid.rs=):/ =TileGrid= holds an origin, a tile
+size in pixels and one =Level= (span in map units, columns, rows) per zoom,
+built by =web_mercator=, =quadtree= (any CRS whose levels halve) or =new=
+(levels that do not, as some national grids have). It gives a tile's bounds,
+the tiles covering a rectangle (an allocation-free iterator; an edge on a
+tile boundary does not pull in the tile beyond, to within a billionth of a
+tile), the level for a resolution (the coarsest that is not magnified), and a
+=TileFrame= mapping map units to tile-local =f32= centred on the tile and
+scaled to +-1. The grid is a concrete type: the selection *trait* above
+depends on the camera, so it arrives with step 4 of § V1 SLICE.
+
+** PREPARE
+- *Cull* by bbox before decoding, using a bbox the source already stores:
+  the GeoPackage envelope or R*Tree, GeoParquet's bbox covering column,
+  FlatGeobuf's packed index. The caller passes it in or skips the feature
+  itself. Without a stored bbox, culling happens after decoding.
+- *Decimate*: drop consecutive points that land in the same device pixel.
+  O(n), allocation-free, lossless at output resolution.
+  /Changed when implemented, 2026-10-29: snap instead./ Dropping "the second
+  point in a pixel" depends on which way a ring runs, so two polygons sharing
+  a border would decimate it differently and open slivers between them. Each
+  coordinate is instead snapped to a grid fixed in map units (a quarter pixel
+  by default, as MVT's 4096 extent is), then repeats and exactly collinear
+  middle points are dropped. On an integer grid both tests are exact, so
+  neighbours agree point for point.
+- *Clip* to the tile plus a guard band, so off-tile coordinates never reach
+  the rasterizer and line joins at tile edges stay clean.
+- *Tessellate* polygons with earcut (hand-rolled, about 500 lines, or
+  =earcutr=). Not =lyon=, which is heavier than needed.
+  /Implemented 2026-10-29 as a port of mapbox/earcut v3/ (=src/earcut.rs=),
+  under its ISC licence, whose notice the file and =../NOTICE= carry.
+- *Lines are uploaded as centerlines* and expanded (width, joins, caps) in the
+  vertex shader. That keeps prepare cheap and buffers small, and widths stay
+  right at any zoom.
+- *Style class index per vertex*, not baked colors (§ STYLING).
+
+/Implemented 2026-10-29 (=src/prepare.rs=, =src/earcut.rs=)./ =MeshBuilder=
+is a =Sink= for one tile (=for_tile=, or =new= with a =Detail=: tile size,
+grid step, guard band). Rings are clipped by Sutherland--Hodgman, lines by
+Liang--Barsky; a ring wholly inside skips clipping and one wholly outside is
+dropped without it, and edges clipping creates along the clip boundary are
+filled but not outlined. Verified on real data (=tests/prepare_counties.rs=):
+cut into tiles with no guard band, all 3,222 US counties' fill area across
+every tile matches their exact area -- within 3e-2 square degrees at worst,
+four orders of magnitude inside the snapping bound -- and no vertex leaves its
+tile. All 3,222 into the 2,560 tiles of a 512-pixel level 7 (degree grid)
+takes 13 ms in release. That data is already a generalised 1:20M boundary
+set, so decimation barely shows on it (79% of points kept at level 3); the
+28-million-vertex DuckMap roads layer is the honest benchmark for it.
+Fine levels emit more vertices than they read (148% at level 9): clipping
+adds points where borders cross tile edges, and each tile keeps its own.
+
+Prepared tiles are flat =Vec<f32>= / =Vec<u32>= buffers. In the browser they
+cross from a Web Worker to the main thread as zero-copy transferable
+=ArrayBuffer=s, which is the only parallelism wasm has without COOP/COEP
+headers. Natively, prepare runs on =std::thread=.
+
+** TILE CACHE
+- One LRU cache with one *byte budget* covers vector and raster. The embedder
+  sets the budget.
+- After a tile is uploaded to the GPU, its CPU copy is dropped. GPU memory
+  holds the only copy (picking does not need CPU geometry; § HIT-TESTING).
+- The camera reports which tiles it needs; the embedder fetches them and hands
+  the bytes to prepare. While a level loads, the parent level is drawn scaled.
+
+** RASTER -- through the same cache (user decision, 2026-10-29)
+- Store the *raw band*, not colored RGBA: an =R8= texture for a categorical
+  band like DuckMap's =lcmap_lcpri=, =R32F= for continuous data. The colormap
+  is a lookup texture applied in the shader.
+- That is 4x less memory than RGBA for u8 bands, and changing the colormap is
+  instant, through the same mechanism as vector restyling.
+- Categorical bands sample nearest-neighbour. Linear filtering of float
+  textures needs a WebGL2 extension (=OES_texture_float_linear=), so
+  continuous bands need a fallback where it is missing.
+- Pre-rendered RGBA tiles (third-party XYZ PNG basemaps) are uploaded as is.
+- *Mesh warp.* Warping is CRS math, so nazca cannot warp per pixel in a
+  shader. Instead the caller has =geoscribe= project a coarse control grid
+  (say 16x16 points per tile), and nazca draws the texture over that mesh;
+  the GPU interpolates between control points. The CRS math stays in
+  =geoscribe=, the per-pixel work stays on the GPU, and the error is a
+  fraction of a pixel for most projections at tile scale. The same mechanism
+  drapes rasters on the globe (§ GLOBE).
+
+** STYLING -- decided 2026-10-29 (user decision)
+- Plain Rust structs plus a per-feature callback that returns a style class.
+  No nazca expression language: DuckMap's SQL already plays that role.
+- Colors, widths and opacity live in a small *palette texture* indexed by
+  style class. Restyling (a =layer_styles= row edited in SQL, DuckMap
+  APP_SPEC step 6) rewrites the palette only; no tile is re-prepared.
+- Visibility and min/max zoom are per layer and checked at draw time.
+- A MapLibre style-spec subset could come later as an optional adapter (an
+  external spec, so Rule 1 friendly). Not in v1.
+
+** HIT-TESTING
+- *ID-buffer picking*: render feature ids to an offscreen buffer and read back
+  one pixel. Returns =(layer, feature_id)=; the embedder fetches attributes
+  (DuckMap: one Quack lookup for its popup).
+- No CPU-side geometry is kept for picking, which is what lets the cache drop
+  CPU copies after upload.
+- Reading pixels back stalls WebGL, so hover picking needs throttling. Click
+  picking is effectively free.
+
+** CAMERA
+Pan, zoom about a point, rotate, =fit_bounds=, and easing for animated
+moves. Pure math with no event handling; the embedder calls it from its own
+input events.
+
+*Built on a 4x4 matrix from the start.* v1 uses it only as a flat 2D
+orthographic view, but the type is ready for a perspective globe camera
+without changing the backends or the shaders' interface.
+
+** GLOBE -- after MapLibre parity (user decision, 2026-10-29)
+MapLibre's globe projects Web Mercator to a sphere in the vertex shader. That
+is CRS math, which nazca does not do (§ CHARTER in =../project.org=). The
+charter-clean way:
+
+- *The caller converts to geocentric XYZ* (EPSG:4978) with =geoscribe=. That
+  is an ordinary CRS conversion.
+- *Nazca renders 3D points with a perspective camera.* Camera math, no CRS.
+
+What this gets for free from the rest of the design:
+- *Precision*: tile-local coordinates (relative to each tile's centre) fix
+  f32 jitter at Earth-radius scale exactly as they do in 2D.
+- *Raster*: draped over a =geoscribe=-computed mesh, the § RASTER mesh warp.
+- *Picking*: the ID buffer works unchanged in 3D.
+- *The antimeridian*: geocentric coordinates have no seam at +-180.
+
+What it costs:
+- *Memory*: 3 floats per vertex instead of 2, about 50% more vertex memory,
+  in globe mode only. Flat tiles keep 2D buffers.
+- *Densification*: long edges must be densified before conversion or they cut
+  through the sphere. Geographic work, so the caller does it with
+  =geoscribe=, at a tolerance matched to the zoom level.
+- *Tile selection is the hard part*: frustum and horizon culling, and level
+  of detail chosen by distance rather than zoom, all needing each tile's 3D
+  bounds before its data arrives. Nazca does the culling; the bounds come
+  from the caller's tile-grid trait implementation over =geoscribe=.
+- *Poles*: Web Mercator tiles stop near 85 degrees, so the globe needs polar
+  caps filled.
+
+** PERFORMANCE COSTS OF THE SEPARATION
+The crate boundary itself is close to free (§ INPUT, generic sink).
+What the charter does cost:
+- *No projection in shaders.* Covered for the globe by § GLOBE and for
+  warping by § RASTER's mesh warp.
+- *Projection runs before decimation*, so every vertex is projected, including
+  those decimation then drops. Mitigation: project upstream once (DuckMap's
+  tile route can =ST_Transform= and simplify in DuckDB), or have the caller
+  pre-simplify with =geoscribe= per zoom level. Either way it is paid once per
+  tile at prepare, never per frame: the camera never re-projects.
+- *Attribute lookups take a round trip* (from nazca not holding attributes,
+  not from the charter). The embedder can cache them per tile if it matters.
+- *One wasm module.* The consumer crate must compile =geoscribe= and nazca
+  into a single wasm module; two modules would copy every coordinate buffer
+  through JS.
+
+** BACKENDS
+| Backend | Feature | Used for |
+|---------+---------+----------|
+| GPU via =glow= | =gl= | interactive, browser (WebGL2) and native (OpenGL) |
+| SVG writer | default | vector layouts |
+| =tiny-skia= | =raster= | PNG export, server-side raster tiles |
+
+Not a backend but also feature-gated: =mvt= (decoder, no dependency;
+§ MAPLIBRE PARITY) and =text= (glyphs; § LABELS).
+
+- =glow= over =wgpu=: a thin, pure-Rust GL binding that covers WebGL2 and
+  native GL and adds tens of KB to a wasm build rather than megabytes. WebGPU
+  can come later if a need appears.
+- All backends replay the same draw-command buffer: flat opcodes plus
+  =f32= data.
+- *Native windowing is the embedder's.* An example under =examples/= using
+  =winit= + =glutin= (dev-dependencies only) is the reference embedder.
+
+** LABELS -- after MapLibre parity (user decision, 2026-10-29)
+Interactive labels must stay put across pan and zoom without flicker, which
+is much harder than placing them once for a layout. DuckMap's MapLibre page
+uses no =symbol= layers, so labels are not needed for parity and are not in
+v1. After parity: point labels with a stable priority order first; line
+labels later. Glyphs come in
+as font bytes from the embedder (no filesystem access, for wasm). The SVG
+backend can emit =<text>= and let the viewer shape it.
+
+** MAPLIBRE PARITY -- the v1 acceptance target
+What =DuckMap/ingestion/web/interactive_map.html= uses from MapLibre, as of
+2026-10-29:
+- Layer types: =fill=, =line=, =raster=. No =symbol= layers.
+- Sources: DuckMap's own MVT vector tiles; a PMTiles (MVT) basemap; XYZ raster
+  tiles.
+- Paint/layout: =fill-color=, =fill-opacity=, =line-color=, =line-width=,
+  =raster-opacity=, =visibility=, =minzoom= / =maxzoom=.
+- Interaction: click to popup, navigation control (zoom/rotate), =fitBounds=,
+  =load= and =error= events.
+
+DuckMap's own tile route can serve WKB per tile (clipped and simplified by
+DuckDB) instead of MVT once nazca is the client, so its tiles need no
+decoder. The third-party basemap still arrives as MVT inside PMTiles.
+
+*MVT decoding lives in nazca, behind an =mvt= feature* (user decision,
+2026-10-29). A few hundred lines: protobuf varints, the MVT geometry command
+stream, feeding the sink directly with no intermediate geometry. Chosen over
+=geosetta= so a consumer showing a basemap does not have to link a format
+converter for it. Only geometry and feature ids are decoded; MVT properties
+are skipped, matching nazca not holding attributes. Reading the PMTiles
+container (a directory lookup over byte ranges) is the embedder's I/O.
+
+** WHAT MOVES OUT OF DUCKMAP
+=DuckMap/crates/duckmap-core/src/render.rs= is the starting material, but it
+mixes three jobs:
+- *To nazca*: drawing geometry, symbols, legend swatches, the north-arrow and
+  scale-bar graphics, raster colormapping and compositing.
+- *To =geoscribe=*: per-pane reprojection (=proj4rs= today), grid
+  convergence, geodesic distance, =raster_warp.rs=.
+- *Stays in DuckMap*: turning DB rows into nazca styles, Typst page layout,
+  MVT encoding for any remaining MVT consumers.
+
+** V1 SLICE
+1. WKB reader, =Sink= trait and tile grid (done 2026-10-29: =src/wkb.rs=,
+   =src/sink.rs=, =src/grid.rs=; the reader tested against DuckDB on all
+   3,222 US counties).
+
+/The =glow= spike, done 2026-10-29/ -- the rough end-to-end path run ahead
+of steps 2--5 to prove the riskiest seam (GL embedding, native and browser)
+first. The Massachusetts counties go WKB -> =Sink= -> =MeshBuilder= ->
+=gl::Renderer=, with pan and zoom about the cursor:
+- *Native*: =examples/spike/= (winit 0.30 + glutin 0.32, OpenGL 3.3 core;
+  macOS reports =4.1 Metal=). =--screenshot out.png= draws one frame and
+  exits.
+- *Browser*: =spike-web/=, a separate wasm-bindgen consumer crate with its own
+  =[workspace]= (=../../wasm-plan.org=). WebGL 2.0 in Chrome; the release
+  wasm was 143 KB, 73 KB gzipped, of which the embedded fixture is 31 KB;
+  with step 2's earcut and prepare it is 176 KB, 84 KB gzipped.
+- Both draw the same mesh from the same shared =examples/spike/data.rs=: 429
+  vertices, 397 triangles, 429 outline segments (unchanged by step 2's
+  prepare, at the spike's fine 8192-pixel detail).
+- *Spike-quality parts, each replaced by its step*: the triangulator was
+  plain ear clipping with hole bridging, O(n^2) per ear, and =prepare.rs=
+  neither culled, decimated nor clipped; step 2 replaced both (§ PREPARE). Outlines are 1-pixel =GL_LINES= (step 5:
+  shader-expanded). =gl::View= stands in for the camera (step 4).
+- The examples project longitude/latitude to Web Mercator *inside their
+  sink*, standing in for =geoscribe=; nazca does no CRS math.
+2. Prepare: cull, decimate, clip, earcut, style-class index (done
+   2026-10-29; § PREPARE).
+3. Tile cache with a byte budget, vector and raster.
+4. Camera: pan, zoom about a point, rotate, =fit_bounds=, needed-tiles list,
+   and the tile-selection trait (§ TILE GRIDS).
+5. =glow= backend: fills, shader-expanded lines, raster with a color lookup,
+   ID-buffer picking.
+6. *Acceptance*: DuckMap's Views mode runs on nazca with everything in
+   § MAPLIBRE PARITY, and a layout SVG is produced from the same prepared
+   data.
+
+*So v1 does not foreclose the globe* (§ GLOBE), it must also have:
+- a camera built on a 4x4 matrix (§ CAMERA);
+- a vertex format that allows 2D or 3D positions, chosen per tile;
+- tile selection behind a trait (§ TILE GRIDS);
+- mesh-warp raster drawing (§ RASTER).
+These are cheap now and expensive to retrofit. The globe itself (camera
+controls, sphere tile selection, polar caps, densification wiring in DuckMap)
+is the milestone after v1.
+
+** OPEN QUESTIONS
+1. /Closed 2026-10-29 (user decision): the charter test. Two questions,
+   CRS-dependence first, then whether the result is returned as data; see
+   [[file:../project.org][../project.org]] § CHARTER and
+   =geoscribe/project.org= § CHARTER./
+2. /Closed 2026-10-29 (user decision): MVT decoding is a nazca =mvt=
+   feature (§ MAPLIBRE PARITY)./
+3. /Closed 2026-10-29 (user decision): tiered dependency policy
+   ([[file:../project.org][../project.org]] § DEPENDENCY POLICY)./
+4. /Closed 2026-10-29 (user decision): structs plus callback for v1, a
+   MapLibre-spec adapter possibly later (§ STYLING)./
+5. /Closed 2026-10-29 (user decision): labels after MapLibre parity, point
+   labels first (§ LABELS)./

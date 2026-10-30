@@ -1,0 +1,14 @@
+#+TITLE: Nazca Plans
+#+AUTHOR: Daniel Okuniewicz Jr.
+
+* Plans
+Design notes, one self-contained plan per file, ordered by dependency.
+
+- [[file:rendering.org][rendering.org]] -- the rendering pipeline: input,
+  tile grids, prepare, tile cache, raster, styling, hit-testing, camera,
+  backends, globe, MapLibre parity and the v1 slice (2026-10-29).
+
+Nazca's two earlier plans were for reprojection, and moved to =geoscribe=
+with that work on 2026-10-22:
+[[file:../../geoscribe/plans/reprojection.org][reprojection.org]] and
+[[file:../../geoscribe/plans/transform-bounds.org][transform-bounds.org]].

@@ -1,0 +1,36 @@
+[package]
+name = "nazca"
+version = "0.1.0"
+edition = "2024"
+description = "A rendering library for geospatial data: interactive maps and layouts, native and wasm."
+license = "MIT"
+exclude = ["spike-web"]
+
+[lib]
+name = "nazca"
+path = "src/lib.rs"
+
+[features]
+# The default build is standard-library only (project.org § DEPENDENCY
+# POLICY). Each feature adds pure-Rust crates that build for
+# wasm32-unknown-unknown unmodified.
+gl = ["dep:glow"]
+
+[dependencies]
+# Nazca does not depend on `geosetta` or `geoscribe`, and they do not depend on
+# it: the three crates are peers that compose by piping text between their
+# CLIs, or by a caller that links several of them (see ../../architecture.org).
+glow = { version = "0.18.0", optional = true }
+
+# The native spike example's window and GL context, and its --screenshot
+# output. Never needed by the library; not built for wasm targets.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+glutin = "0.32.3"
+glutin-winit = "0.5.0"
+winit = "0.30.13"
+raw-window-handle = "0.6.2"
+png = "0.18.1"
+
+[[example]]
+name = "spike"
+required-features = ["gl"]

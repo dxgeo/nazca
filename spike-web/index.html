@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nazca spike</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #f7f7f2; font: 13px system-ui, sans-serif; }
+  #map { display: block; width: 100vw; height: calc(100vh - 28px); cursor: grab; }
+  #map:active { cursor: grabbing; }
+  #stats { height: 28px; line-height: 28px; padding: 0 12px; color: #444; border-top: 1px solid #ddd; }
+</style>
+</head>
+<body>
+<canvas id="map"></canvas>
+<div id="stats">loading…</div>
+<script type="module">
+  import init from "./pkg/nazca_spike_web.js";
+  init().catch((e) => { document.getElementById("stats").textContent = "error: " + e; });
+</script>
+</body>
+</html>

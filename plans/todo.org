@@ -1,0 +1,15 @@
+#+TITLE: Current Working Items
+#+AUTHOR: Daniel Okuniewicz Jr.
+#+DATE: {{{time(%Y-%m-%d)}}}
+
+* Current Working Items
+Live list of what's open right now. Each entry is just a link to its real
+plan/section for detail; check it off and remove it once the item ships or is
+shelved.
+
+- [ ] *Build the v1 slice* -- [[file:rendering.org][rendering.org]] § V1 SLICE.
+
+/The reprojection items that used to be here (R1--R8, the =proj-db= SQLite
+question, transform-bounds and its failure modes, the CLI) moved to
+[[file:../../geoscribe/plans/todo.org][geoscribe/plans/todo.org]] with the
+plans themselves./
