@@ -4,7 +4,7 @@
 
 * Rendering Pipeline
 
-** STATUS -- v1 slice steps 1--5 implemented; 6 half done (nazca's side)
+** STATUS -- v1 slice implemented (steps 1--6)
 Written 2026-10-29 from a brainstorming session; § V1 SLICE records what is
 built. The scope it serves
 (interactive and layouts equally, replacing MapLibre in DuckMap, native in
@@ -411,7 +411,8 @@ What =DuckMap/ingestion/web/interactive_map.html= uses from MapLibre, as of
 
 *DuckMap's own tile route serves WKB per tile* (user decision, 2026-10-30),
 clipped and simplified by DuckDB, so its tiles need no decoder and skip
-MVT's integer quantization; popups need a label sidecar beside it. *The
+MVT's integer quantization; popups need each feature's label beside it
+(carried in the same response; § V1 SLICE, step 6). *The
 nazca client is a new page beside the MapLibre one* (user decision,
 2026-10-30), so the two can be compared until parity is confirmed. The
 basemap still arrives inside PMTiles, as MVT or as MLT: DuckMap's
@@ -519,10 +520,48 @@ first. The Massachusetts counties go WKB -> =Sink= -> =MeshBuilder= ->
    - /nazca's side, done 2026-10-30:/ the =mvt= and =mlt= decoders
      (§ MAPLIBRE PARITY), zoom-dependent styles (§ STYLING), and the SVG
      backend with =MeshBuilder::for_view= (§ BACKENDS).
-   - /DuckMap's side, next:/ a =duckmap-nazca= wasm consumer crate and a
-     page beside =interactive_map.html=; the WKB tile route and its label
-     sidecar in =duckmap-tiles=; the embedder's PMTiles directory reader;
-     raster tiles decoded from PNG into =Band::Rgba=.
+   - /DuckMap's side, done 2026-10-30/ (in the DuckMap repository):
+     - =duckmap-tiles= serves =/wkb_tiles/{view}/{layer}/{z}/{x}/{y}=: each
+       feature's WKB, longitude/latitude, simplified to a quarter of a
+       512-pixel tile's pixel and clipped to the tile plus 7% (a little over
+       nazca's guard band) by DuckDB, keeping only pieces of the layer's own
+       kind (=ST_CollectionExtract=). The body is a count, then per feature
+       a length-prefixed label and a length-prefixed WKB. *The labels ride
+       in the same response* rather than a separate sidecar request: one
+       query yields both, so they cannot fall out of step. Uncompressed,
+       a counties tile is about four times its MVT (13.5 KB against 3.2 KB
+       at z7); the route sets no compression yet.
+     - =crates/duckmap-nazca= is the wasm consumer (=wasm-pack build
+       --target web=, 428 KB). The page does the I/O and the DOM; the crate
+       holds the camera, one tile cache for every source, and one nazca layer
+       per =layer_styles= row, so a fill and its outline are two layers over
+       the same tiles, as in MapLibre. It reads the MapLibre paint JSON
+       itself (literal colours; numbers literal or zoom curves through
+       =style::interpolate=) and refuses with the property's name what it
+       cannot draw. WKB features are projected to Web Mercator in its sink,
+       as the spikes do. Tiles are selected for the CSS-pixel view at the
+       level =floor(zoom)=, as MapLibre fetches them, not at the device's
+       pixel ratio. A click picks the pickable layers (the view's own) and
+       returns the feature's label.
+     - =ingestion/web/nazca_map.html= is the page beside
+       =interactive_map.html=: the same tables over Quack, the same view
+       picker, basemap picker, legend toggles, raster overlay, navigation
+       buttons (zoom, compass), click popups and =fitBounds= on view change.
+       PMTiles are read with the =pmtiles= library, the same reader the
+       MapLibre page's protocol uses, and the tiles inside handed to nazca as
+       MVT or MLT; raster tiles are PNGs the browser decodes to RGBA.
+       /Export SVG/ writes the view from the same cached tile bytes,
+       re-prepared at the view's resolution and clipped exactly to each
+       tile (rasters left out).
+     - /Verified/ in Chrome against the MapLibre page: both views, all three
+       basemaps (PMTiles MVT, PMTiles MLT, hosted raster), the land-cover
+       overlay, popups, rotation, the SVG export. The two pages draw the same
+       map.
+     - /Known limits/: in the SVG, neighbouring tiles' translucent fills
+       abut exactly, and some viewers antialias each edge, so a faint seam
+       can show along tile edges (the stencil prevents this on screen).
+       Fetches no longer needed are dropped while queued but not cancelled
+       once started.
 
 *So v1 does not foreclose the globe* (§ GLOBE), it must also have:
 - a camera built on a 4x4 matrix (§ CAMERA);
