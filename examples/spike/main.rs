@@ -2,18 +2,23 @@
 //! the Massachusetts counties, prepared tile by tile through nazca's camera,
 //! tile selector and tile cache and drawn by its `gl` backend in a winit
 //! window over an OpenGL 3.3 core context. Drag to pan, scroll to zoom about
-//! the cursor, right-drag to rotate about the window's centre.
+//! the cursor, right-drag to rotate about the window's centre, click to pick
+//! a county, and press R to cycle the raster overlay.
 //!
 //!   cargo run -p nazca --features gl --example spike
 //!   cargo run -p nazca --features gl --example spike -- --screenshot out.png
-//!   cargo run -p nazca --features gl --example spike -- --bearing 30
+//!   cargo run -p nazca --features gl --example spike -- --bearing 30 --raster continuous
 //!
 //! `--screenshot` draws one frame, writes it as a PNG and exits. `--bearing`
-//! opens the map turned that many degrees, east of north up.
+//! opens the map turned that many degrees, east of north up. `--raster`
+//! (`continuous` or `categorical`) opens with that overlay. `--pick X,Y`
+//! picks at that window pixel after the first frame and prints the county.
+//! `--zoom F` opens zoomed in F times about the window's centre.
 
 mod data;
 mod tiles;
 
+use data::Overlay;
 use glutin::config::{ConfigTemplateBuilder, GlConfig};
 use glutin::context::{ContextApi, ContextAttributesBuilder, GlProfile, NotCurrentGlContext, PossiblyCurrentContext, Version};
 use glutin::display::{GetGlDisplay, GlDisplay};
@@ -24,11 +29,12 @@ use nazca::Camera;
 use nazca::gl::Renderer;
 use raw_window_handle::HasWindowHandle;
 use std::num::NonZeroU32;
+use tiles::TiledMap;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use tiles::TiledMap;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 struct Gfx {
@@ -37,31 +43,32 @@ struct Gfx {
     context: PossiblyCurrentContext,
     gl: glow::Context,
     renderer: Renderer,
+    map: TiledMap,
+}
+
+struct Options {
+    screenshot: Option<String>,
+    bearing: f64,
+    overlay: Overlay,
+    pick: Option<[f64; 2]>,
+    zoom: f64,
 }
 
 struct App {
-    screenshot: Option<String>,
-    bearing: f64,
-    map: TiledMap,
+    options: Options,
     gfx: Option<Gfx>,
     camera: Option<Camera>,
     cursor: PhysicalPosition<f64>,
     dragging: bool,
+    /// Where a left press began, to tell a click from a drag.
+    pressed_at: Option<PhysicalPosition<f64>>,
     rotating: bool,
 }
 
 impl App {
     fn redraw(&mut self) {
-        let (Some(g), Some(camera)) = (&self.gfx, &self.camera) else { return };
-        let [w, h] = camera.size_px;
-        let [r, gr, b, a] = data::BACKGROUND;
-        // SAFETY: plain state and clear calls on the current context.
-        unsafe {
-            g.gl.viewport(0, 0, w as i32, h as i32);
-            g.gl.clear_color(r, gr, b, a);
-            g.gl.clear(glow::COLOR_BUFFER_BIT);
-        }
-        let stats = self.map.draw(&g.gl, &g.renderer, camera);
+        let (Some(g), Some(camera)) = (&mut self.gfx, &self.camera) else { return };
+        let stats = g.map.draw(&g.gl, &g.renderer, camera);
         if stats.prepared > 0 {
             println!(
                 "level {}: {} tiles drawn, {} prepared; {} cached, {} KB",
@@ -72,8 +79,14 @@ impl App {
                 stats.cached_bytes / 1024
             );
         }
-
-        if let Some(path) = self.screenshot.take() {
+        if let Some(px) = self.options.pick.take() {
+            report(g.map.pick(&g.gl, &g.renderer, camera, px), px);
+        }
+        if let Some(path) = self.options.screenshot.take() {
+            let [w, h] = camera.size_px;
+            // The pick (if any) rebound the window; draw again so the read
+            // sees a frame drawn after it.
+            g.map.draw(&g.gl, &g.renderer, camera);
             let mut pixels = vec![0u8; (w * h * 4) as usize];
             // SAFETY: reads the frame just drawn into a buffer sized for it.
             unsafe {
@@ -91,7 +104,13 @@ impl App {
         }
         g.surface.swap_buffers(&g.context).unwrap();
     }
+}
 
+fn report(pick: Option<(&str, u32)>, px: [f64; 2]) {
+    match pick {
+        Some((name, id)) => println!("picked {name} County (feature {id}) at {px:?}"),
+        None => println!("picked nothing at {px:?}"),
+    }
 }
 
 impl ApplicationHandler for App {
@@ -100,7 +119,8 @@ impl ApplicationHandler for App {
             return;
         }
         let attributes = Window::default_attributes().with_title("nazca spike").with_inner_size(LogicalSize::new(900.0, 700.0));
-        let template = ConfigTemplateBuilder::new().with_multisampling(4);
+        // A stencil buffer: each tile claims its pixels in it.
+        let template = ConfigTemplateBuilder::new().with_multisampling(4).with_stencil_size(8);
         let (window, config) = DisplayBuilder::new()
             .with_window_attributes(Some(attributes))
             .build(event_loop, template, |configs| configs.max_by_key(|c| c.num_samples()).unwrap())
@@ -121,32 +141,43 @@ impl ApplicationHandler for App {
             let gl = glow::Context::from_loader_function_cstr(|s| display.get_proc_address(s));
             (context, surface, gl)
         };
-        println!("GL: {}", unsafe { gl.get_parameter_string(glow::VERSION) });
+        println!("GL: {}, stencil bits: {}", unsafe { gl.get_parameter_string(glow::VERSION) }, config.stencil_size());
 
         let renderer = Renderer::new(&gl).unwrap();
+        let map = TiledMap::new(&gl, &renderer, 16 << 20, self.options.overlay);
 
         // Fit the counties, with a margin.
         let size = window.inner_size();
         let mut camera = Camera::new([0.0, 0.0], 1.0, [size.width, size.height]);
-        camera.bearing = self.bearing.to_radians();
-        camera.fit_bounds(self.map.bounds(), 0.04 * size.width.min(size.height) as f64);
+        camera.bearing = self.options.bearing.to_radians();
+        camera.fit_bounds(map.bounds(), 0.04 * size.width.min(size.height) as f64);
+        camera.zoom_about([size.width as f64 / 2.0, size.height as f64 / 2.0], self.options.zoom);
         self.camera = Some(camera);
         window.request_redraw();
-        self.gfx = Some(Gfx { window, surface, context, gl, renderer });
+        self.gfx = Some(Gfx { window, surface, context, gl, renderer, map });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-        let Some(camera) = self.camera.as_mut() else { return };
+        let (Some(camera), Some(g)) = (self.camera.as_mut(), self.gfx.as_mut()) else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
-                if let Some(g) = &self.gfx {
-                    g.surface.resize(&g.context, NonZeroU32::new(size.width).unwrap(), NonZeroU32::new(size.height).unwrap());
-                }
+                g.surface.resize(&g.context, NonZeroU32::new(size.width).unwrap(), NonZeroU32::new(size.height).unwrap());
                 camera.resize([size.width, size.height]);
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 self.dragging = state == ElementState::Pressed;
+                match state {
+                    ElementState::Pressed => self.pressed_at = Some(self.cursor),
+                    ElementState::Released => {
+                        let start = self.pressed_at.take();
+                        // A press and release in nearly one place is a click.
+                        if start.is_some_and(|s| (s.x - self.cursor.x).abs() + (s.y - self.cursor.y).abs() < 4.0) {
+                            let px = [self.cursor.x, self.cursor.y];
+                            report(g.map.pick(&g.gl, &g.renderer, camera, px), px);
+                        }
+                    }
+                }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
                 self.rotating = state == ElementState::Pressed;
@@ -169,6 +200,15 @@ impl ApplicationHandler for App {
                 };
                 camera.zoom_about([self.cursor.x, self.cursor.y], 1.15f64.powf(steps));
             }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => match event.logical_key {
+                Key::Character(c) if c.eq_ignore_ascii_case("r") => {
+                    let next = g.map.overlay().next();
+                    g.map.set_overlay(&g.gl, &g.renderer, next);
+                    println!("overlay: {next:?}");
+                }
+                Key::Named(NamedKey::Escape) => event_loop.exit(),
+                _ => return,
+            },
             WindowEvent::RedrawRequested => {
                 self.redraw();
                 return;
@@ -183,28 +223,40 @@ impl ApplicationHandler for App {
 
 fn main() {
     let usage = || -> ! {
-        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees]");
+        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--zoom F]");
         std::process::exit(2);
     };
-    let (mut screenshot, mut bearing) = (None, 0.0);
+    let mut options = Options { screenshot: None, bearing: 0.0, overlay: Overlay::None, pick: None, zoom: 1.0 };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next().unwrap_or_else(|| usage());
         match flag.as_str() {
-            "--screenshot" => screenshot = Some(value),
-            "--bearing" => bearing = value.parse().unwrap_or_else(|_| usage()),
+            "--screenshot" => options.screenshot = Some(value),
+            "--bearing" => options.bearing = value.parse().unwrap_or_else(|_| usage()),
+            "--zoom" => options.zoom = value.parse().unwrap_or_else(|_| usage()),
+            "--raster" => {
+                options.overlay = match value.as_str() {
+                    "continuous" => Overlay::Continuous,
+                    "categorical" => Overlay::Categorical,
+                    _ => usage(),
+                }
+            }
+            "--pick" => {
+                let xy: Vec<f64> = value.split(',').map(|v| v.parse().unwrap_or_else(|_| usage())).collect();
+                let [x, y] = xy[..] else { usage() };
+                options.pick = Some([x, y]);
+            }
             _ => usage(),
         }
     }
     let event_loop = EventLoop::new().unwrap();
     let mut app = App {
-        screenshot,
-        bearing,
-        map: TiledMap::new(16 << 20),
+        options,
         gfx: None,
         camera: None,
         cursor: PhysicalPosition::new(0.0, 0.0),
         dragging: false,
+        pressed_at: None,
         rotating: false,
     };
     event_loop.run_app(&mut app).unwrap();

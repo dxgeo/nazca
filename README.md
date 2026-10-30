@@ -14,8 +14,9 @@ Like its siblings [Geosetta](https://github.com/dxgeo/geosetta) and Geoscribe,
 Nazca depends on neither of them, and neither depends on it.
 
 **Status: early.** A streaming WKB reader, the geometry `Sink` trait, tile
-grids, tile preparation, a tile cache and a camera exist, and a spike draws
-tiled polygons through them with OpenGL natively and WebGL2 in a browser
+grids, tile preparation, a tile cache, a camera and an OpenGL/WebGL2 backend
+(styled fills and lines, colormapped rasters, picking) exist, and a spike
+draws and picks tiled polygons through them natively and in a browser
 (`examples/spike`, `spike-web/`). Scope is in [`project.org`](project.org); the pipeline
 design is in [`plans/rendering.org`](plans/rendering.org).
 

@@ -42,8 +42,10 @@ pub struct TileKey {
 /// the caller and reused, so planning allocates nothing in steady state.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Plan {
-    /// Cached tiles to draw, coarsest level first so finer tiles land on top
-    /// of any ancestor standing in around them.
+    /// Cached tiles to draw, finest level first. A backend gives each pixel
+    /// to the first tile that covers it (the `gl` backend by stencil), so a
+    /// loaded tile keeps its area and an ancestor standing in around it fills
+    /// only the rest; neither draws over the other.
     pub draw: Vec<TileId>,
     /// Needed tiles neither cached nor already being fetched, most important
     /// first. Planning marks them pending.
@@ -114,9 +116,9 @@ impl<V> TileCache<V> {
             }
             self.stand_in(source, grid, tile, &mut plan.draw);
         }
-        // Coarsest first; within a level, any order. A stand-in shared by
+        // Finest first; within a level, any order. A stand-in shared by
         // several needed tiles is drawn once.
-        plan.draw.sort_by_key(|t| (t.z, t.y, t.x));
+        plan.draw.sort_by_key(|t| (std::cmp::Reverse(t.z), t.y, t.x));
         plan.draw.dedup();
     }
 
@@ -324,8 +326,8 @@ mod tests {
         let needed = [t(3, 1, 1), t(3, 2, 1), t(3, 1, 2), t(3, 2, 2)];
         cache.plan(0, &g, &needed, &mut plan);
         assert_eq!(plan.fetch, [t(3, 2, 1), t(3, 1, 2), t(3, 2, 2)]);
-        // The grandparent once, under the loaded tile.
-        assert_eq!(plan.draw, [t(1, 0, 0), t(3, 1, 1)]);
+        // The loaded tile, then the grandparent once around it.
+        assert_eq!(plan.draw, [t(3, 1, 1), t(1, 0, 0)]);
         // A nearer ancestor wins over a farther one.
         cache.insert(k(t(2, 1, 1)), "parent", 10);
         cache.plan(0, &g, &[t(3, 2, 2)], &mut plan);

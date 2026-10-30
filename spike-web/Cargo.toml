@@ -23,9 +23,11 @@ web-sys = { version = "0.3.106", features = [
     "Event",
     "EventTarget",
     "HtmlCanvasElement",
+    "KeyboardEvent",
     "MouseEvent",
     "Node",
     "WebGl2RenderingContext",
+    "WebGlContextAttributes",
     "WheelEvent",
     "Window",
 ] }

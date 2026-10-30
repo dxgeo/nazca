@@ -1,7 +1,8 @@
 //! The browser half of nazca's `glow` spike: the same counties and the same
 //! camera, tile selector, tile cache and `gl` backend as `../examples/spike`,
 //! in a WebGL2 canvas. Drag to pan, scroll to zoom about the cursor,
-//! right-drag to rotate about the canvas's centre.
+//! right-drag to rotate about the canvas's centre, click to pick a county,
+//! and press R to cycle the raster overlay.
 //!
 //!   wasm-pack build --target web --release
 //!   python3 -m http.server   # then open http://localhost:8000/
@@ -14,6 +15,7 @@ mod data;
 #[path = "../../examples/spike/tiles.rs"]
 mod tiles;
 
+use data::Overlay;
 use glow::HasContext;
 use nazca::Camera;
 use nazca::gl::Renderer;
@@ -22,7 +24,7 @@ use std::rc::Rc;
 use tiles::TiledMap;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use web_sys::{AddEventListenerOptions, HtmlCanvasElement, MouseEvent, WebGl2RenderingContext, WheelEvent};
+use web_sys::{AddEventListenerOptions, HtmlCanvasElement, KeyboardEvent, MouseEvent, WebGl2RenderingContext, WebGlContextAttributes, WheelEvent};
 
 struct State {
     gl: glow::Context,
@@ -33,6 +35,10 @@ struct State {
     /// The pointer's last position while a button is held, and whether that
     /// button rotates rather than pans.
     drag: Option<(f64, f64, bool)>,
+    /// Where a left press began, to tell a click from a drag.
+    pressed_at: Option<(f64, f64)>,
+    /// What the last click picked, shown with the stats.
+    picked: String,
     stats: Option<web_sys::Element>,
     version: String,
 }
@@ -40,27 +46,21 @@ struct State {
 impl State {
     fn draw(&mut self) {
         let [w, h] = self.camera.size_px;
-        let [r, g, b, a] = data::BACKGROUND;
-        // SAFETY: plain state and clear calls on this canvas's context.
-        unsafe {
-            self.gl.viewport(0, 0, w as i32, h as i32);
-            self.gl.clear_color(r, g, b, a);
-            self.gl.clear(glow::COLOR_BUFFER_BIT);
-        }
         let s = self.map.draw(&self.gl, &self.renderer, &self.camera);
         if let Some(stats) = &self.stats {
             stats.set_text_content(Some(&format!(
-                "{} · level {} · {} tiles drawn, {} just prepared · {} cached, {} KB · {w}x{h} px",
+                "{} · level {} · {} tiles drawn, {} just prepared · {} cached, {} KB · {w}x{h} px · overlay {:?}{}",
                 self.version,
                 s.level,
                 s.drawn,
                 s.prepared,
                 s.cached,
-                s.cached_bytes / 1024
+                s.cached_bytes / 1024,
+                self.map.overlay(),
+                self.picked
             )));
         }
     }
-
 }
 
 #[wasm_bindgen(start)]
@@ -75,17 +75,22 @@ pub fn start() -> Result<(), JsValue> {
     canvas.set_width(w);
     canvas.set_height(h);
 
-    let context: WebGl2RenderingContext = canvas.get_context("webgl2")?.ok_or("WebGL2 unavailable")?.dyn_into()?;
+    // A stencil buffer, which WebGL leaves out unless asked: each tile
+    // claims its pixels in it.
+    let attributes = WebGlContextAttributes::new();
+    attributes.set_stencil(true);
+    let context: WebGl2RenderingContext =
+        canvas.get_context_with_context_options("webgl2", &attributes)?.ok_or("WebGL2 unavailable")?.dyn_into()?;
     let gl = glow::Context::from_webgl2_context(context);
     let renderer = Renderer::new(&gl).map_err(|e| JsValue::from_str(&e))?;
     // SAFETY: a string query on the context just created.
     let version = unsafe { gl.get_parameter_string(glow::VERSION) };
 
-    let map = TiledMap::new(16 << 20);
+    let map = TiledMap::new(&gl, &renderer, 16 << 20, Overlay::None);
     let mut camera = Camera::new([0.0, 0.0], 1.0, [w, h]);
     camera.fit_bounds(map.bounds(), 0.04 * w.min(h) as f64);
     let stats = document.get_element_by_id("stats");
-    let state = Rc::new(RefCell::new(State { gl, renderer, map, camera, dpr, drag: None, stats, version }));
+    let state = Rc::new(RefCell::new(State { gl, renderer, map, camera, dpr, drag: None, pressed_at: None, picked: String::new(), stats, version }));
     state.borrow_mut().draw();
 
     let on = |target: &web_sys::EventTarget, name: &str, f: Box<dyn FnMut(web_sys::Event)>| -> Result<(), JsValue> {
@@ -101,7 +106,28 @@ pub fn start() -> Result<(), JsValue> {
     let s = state.clone();
     on(&canvas, "mousedown", Box::new(move |e| {
         let e: MouseEvent = e.unchecked_into();
-        s.borrow_mut().drag = Some((e.offset_x() as f64, e.offset_y() as f64, e.button() == 2));
+        let mut st = s.borrow_mut();
+        let (x, y) = (e.offset_x() as f64, e.offset_y() as f64);
+        st.drag = Some((x, y, e.button() == 2));
+        st.pressed_at = (e.button() == 0).then_some((x, y));
+    }))?;
+    let s = state.clone();
+    on(&canvas, "mouseup", Box::new(move |e| {
+        let e: MouseEvent = e.unchecked_into();
+        let mut st = s.borrow_mut();
+        let (x, y) = (e.offset_x() as f64, e.offset_y() as f64);
+        // A press and release in nearly one place is a click.
+        let Some((x0, y0)) = st.pressed_at.take() else { return };
+        if (x - x0).abs() + (y - y0).abs() >= 4.0 {
+            return;
+        }
+        let st = &mut *st;
+        let px = [x * st.dpr, y * st.dpr];
+        st.picked = match st.map.pick(&st.gl, &st.renderer, &st.camera, px) {
+            Some((name, id)) => format!(" · picked {name} County (feature {id})"),
+            None => " · picked nothing".to_string(),
+        };
+        st.draw();
     }))?;
     // The right button rotates, so it must not open the context menu.
     on(&canvas, "contextmenu", Box::new(|e| e.prevent_default()))?;
@@ -132,6 +158,18 @@ pub fn start() -> Result<(), JsValue> {
         let (x, y) = (e.offset_x() as f64, e.offset_y() as f64);
         let dpr = st.dpr;
         st.camera.zoom_about([x * dpr, y * dpr], 1.15f64.powf(-e.delta_y() / 100.0));
+        st.draw();
+    }))?;
+    let s = state.clone();
+    on(&window, "keydown", Box::new(move |e| {
+        let e: KeyboardEvent = e.unchecked_into();
+        if !e.key().eq_ignore_ascii_case("r") {
+            return;
+        }
+        let mut st = s.borrow_mut();
+        let st = &mut *st;
+        let next = st.map.overlay().next();
+        st.map.set_overlay(&st.gl, &st.renderer, next);
         st.draw();
     }))?;
     Ok(())

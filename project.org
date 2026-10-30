@@ -139,10 +139,12 @@ as a =cdylib= inside nazca ([[file:../wasm-plan.org][../wasm-plan.org]]). In
 practice that consumer is DuckMap.
 
 ** STATUS
-Scope written 2026-10-29. Implemented: v1 slice steps 1--4 -- the =Sink=
+Scope written 2026-10-29. Implemented: v1 slice steps 1--5 -- the =Sink=
 trait, the streaming WKB reader, the tile grid, prepare (snapping, clipping,
-earcut), the tile cache, and the camera with its tile-selection trait -- and
-the =glow= spike drawing counties tile by tile through them, natively and in
-a browser (plans/rendering.org § V1 SLICE). See
+earcut), the tile cache, the camera with its tile-selection trait, and the
+=glow= backend (palette-styled fills, shader-expanded lines and points,
+colormapped and mesh-warped rasters, ID-buffer picking) -- and the spike
+drawing and picking counties tile by tile through them, natively and in a
+browser (plans/rendering.org § V1 SLICE). See
 [[file:plans/rendering.org][plans/rendering.org]] and
 [[file:plans/todo.org][plans/todo.org]].

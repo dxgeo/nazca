@@ -4,7 +4,7 @@
 
 * Rendering Pipeline
 
-** STATUS -- v1 slice steps 1--4 implemented; 5 and 6 open
+** STATUS -- v1 slice steps 1--5 implemented; 6 open
 Written 2026-10-29 from a brainstorming session; § V1 SLICE records what is
 built. The scope it serves
 (interactive and layouts equally, replacing MapLibre in DuckMap, native in
@@ -155,7 +155,7 @@ what it holds, so the embedder's value is an enum of the backend's mesh and
 texture and one budget covers both. Tiles are keyed by =(source, TileId)=,
 the source numbered by the embedder. A frame is =begin_frame=, then per source
 =plan(source, grid, needed, &mut Plan)=, which writes the tiles to draw now
-(coarsest level first) and those to fetch (needed, not cached, not already
+(finest level first, see the stencil claims in § BACKENDS) and those to fetch (needed, not cached, not already
 pending; planning marks them pending), then =insert= or =fail= as fetches
 finish.
 - *Stand-ins*: a missing tile is covered by its nearest level of cached
@@ -169,14 +169,14 @@ finish.
   back of the order, so eviction stops at the first current-frame tile.
 - *Freeing is the caller's*: GPU objects are not freed by =Drop=, so
   =insert=, =remove=, =remove_source= and =set_budget= return what they let
-  go of. =Mesh::byte_size= is the size to insert a mesh at.
+  go of. =GpuMesh::bytes= and =GpuRaster::bytes= are the sizes to insert
+  them at.
 - *A fetch that finds nothing* is better inserted as an empty tile than
   failed: =fail= only clears the pending mark, and when to retry is the
   embedder's call.
-- Not yet: clipping each tile's drawing to its own bounds (scissor or
-  stencil, step 5). Opaque fills hide the overlap of a stand-in and its
-  loaded neighbours, and of neighbours' guard bands; translucent ones would
-  blend twice there.
+- Tiles overlap (guard bands; a stand-in and its loaded neighbours), and
+  the =gl= backend gives each pixel to one tile by stencil (§ BACKENDS), which
+  is why =Plan::draw= lists the finest level first.
 
 ** RASTER -- through the same cache (user decision, 2026-10-29)
 - Store the *raw band*, not colored RGBA: an =R8= texture for a categorical
@@ -196,6 +196,23 @@ finish.
   fraction of a pixel for most projections at tile scale. The same mechanism
   drapes rasters on the globe (§ GLOBE).
 
+/Implemented 2026-10-30 (=src/raster.rs=, =src/style.rs=, =src/gl.rs=):/
+=Raster::new(width, height, Band)= checks the band fills its size; =Band= is
+=Categorical(&[u8])= (an =R8= texture, nearest), =Continuous { values,
+nodata }= (=R32F=; NaN and =nodata= draw nothing), or =Rgba(&[u8])= as is.
+A continuous band is filtered linearly where the GPU can (desktop GL always,
+WebGL2 with =OES_texture_float_linear=, which glow enables when offered) and
+the band has no =nodata= value to blend into its neighbours; otherwise
+nearest. A NaN still erodes its linearly filtered neighbours by up to a
+pixel. =RasterMesh::rect= draws an image in the map's CRS;
+=RasterMesh::warped(frame, cols, rows, points)= stretches it over a
+caller-projected control grid. =Colormap= is 256 RGBA8 entries, by value
+(=categorical=, unlisted values transparent) or along a domain (=ramp=
+through stops), uploaded as a 256 x 1 texture. Rasters are drawn with an
+opacity, and claim their pixels by their own mesh. Verified in the spikes
+with a lon/lat distance field warped onto Web Mercator through a 9 x 9 grid:
+its rings come out as circles.
+
 ** STYLING -- decided 2026-10-29 (user decision)
 - Plain Rust structs plus a per-feature callback that returns a style class.
   No nazca expression language: DuckMap's SQL already plays that role.
@@ -206,6 +223,14 @@ finish.
 - A MapLibre style-spec subset could come later as an optional adapter (an
   external spec, so Rule 1 friendly). Not in v1.
 
+/Implemented 2026-10-30 (=src/style.rs=):/ =Style { fill, line, line_width,
+point_size }=, colours as straight-alpha RGBA, and a =Palette= of 256 of them
+(a class is a =u8=; unset classes draw nothing). The =gl= backend holds it as
+a 256 x 3 =RGBA32F= texture (fill row, line row, width and point-size row)
+read by =texelFetch=; =update_palette= restyles in one upload. Visibility
+and min/max zoom are the embedder's for now: it chooses which layers to
+draw.
+
 ** HIT-TESTING
 - *ID-buffer picking*: render feature ids to an offscreen buffer and read back
   one pixel. Returns =(layer, feature_id)=; the embedder fetches attributes
@@ -214,6 +239,17 @@ finish.
   CPU copies after upload.
 - Reading pixels back stalls WebGL, so hover picking needs throttling. Click
   picking is effectively free.
+
+/Implemented 2026-10-30 (=gl::Picker=):/ prepare stores a feature id per
+vertex (=MeshBuilder::set_feature=, =Mesh::ids=). The picker redraws the
+tiles into a *one-pixel* =RGBA32UI= framebuffer (with a stencil): a post
+matrix maps the asked-for pixel onto the whole target, so its memory is 16
+bytes whatever the viewport. Lines are expanded in the full viewport's
+pixels before that mapping, so what picks is what draws; lines and points
+narrower than a tolerance pick as if that wide. Fills pick even when
+transparent. =Pick { layer, feature }=, with =layer= the embedder's number.
+Rasters are not picked and do not hide features below them. Verified
+natively and in Chrome's WebGL2 on the counties.
 
 ** CAMERA
 Pan, zoom about a point, rotate, =fit_bounds=, and easing for animated
@@ -301,6 +337,30 @@ Not a backend but also feature-gated: =mvt= (decoder, no dependency;
 - *Native windowing is the embedder's.* An example under =examples/= using
   =winit= + =glutin= (dev-dependencies only) is the reference embedder.
 
+/The =glow= backend, implemented 2026-10-30 (=src/gl.rs=):/
+- *Fills*: the mesh's triangles, coloured from the palette texture.
+- *Lines*: outline segments become instances of a quad expanded in the
+  vertex shader around the segment, in pixels; the fragment shader keeps
+  what lies within half the width, with a one-pixel antialiased edge. That
+  gives round caps and joins with no neighbour information. Points are the
+  same quad around a zero-length segment: a dot of =point_size= in the fill
+  colour.
+- *Each pixel belongs to one tile*, by stencil: a tile *claims* its square's
+  unclaimed pixels (0 -> 2), draws only there (== 2), then *settles* them
+  (-> 1). Tiles drawn finest first keep their area from coarser stand-ins;
+  same-level guard bands never draw twice. The claimed square is grown by one
+  pixel so the rounding of two neighbours' f32 matrices cannot open a seam;
+  the guard band holds the same geometry there. =begin_layer= clears the
+  stencil. The context needs a stencil buffer (WebGL leaves it out unless
+  asked). Verified with translucent fills over 16 tiles: no tile edge shows.
+- *Known limits*: a translucent line blends twice where segments' round ends
+  overlap (darker dots at vertices), and a border two polygons share is
+  outlined by both. Neither shows with opaque lines; MapLibre parity needs
+  no =line-opacity=.
+- The draw-command buffer above is not built: the =gl= backend is driven
+  directly. It arrives with the SVG backend (step 6), when there is a
+  second backend to share it.
+
 ** LABELS -- after MapLibre parity (user decision, 2026-10-29)
 Interactive labels must stay put across pan and zoom without flicker, which
 is much harder than placing them once for a layout. DuckMap's MapLibre page
@@ -359,19 +419,22 @@ first. The Massachusetts counties go WKB -> =Sink= -> =MeshBuilder= ->
   =[workspace]= (=../../wasm-plan.org=). WebGL 2.0 in Chrome; the release
   wasm was 143 KB, 73 KB gzipped, of which the embedded fixture is 31 KB;
   with step 2's earcut and prepare it is 176 KB, 84 KB gzipped; with steps 3
-  and 4, 212 KB, 99 KB gzipped.
+  and 4, 212 KB, 99 KB gzipped; with step 5, 241 KB, 109 KB gzipped.
 - Both share =examples/spike/data.rs= (the counties as WKB with their stored
   bounds, prepared per tile on request) and =examples/spike/tiles.rs= (the
   frame loop: select, plan, prepare and upload what is missing, draw). Since
   step 4 they draw 512-pixel Web Mercator tiles through the camera, selector
   and cache, and right-drag rotates; the native spike takes =--bearing
   degrees=. Preparing is synchronous there, so stand-ins are never seen; the
-  fit-to-state opening view at 1800x1400 is 36 level-9 tiles, 20 KB.
+  fit-to-state opening view at 1800x1400 is 36 level-9 tiles, 32 KB on the
+  GPU. Since step 5 a click picks a county, R cycles a raster overlay
+  (none, continuous, categorical), and the native spike takes =--raster=,
+  =--pick X,Y= and =--zoom F= for screenshots.
 - *Spike-quality parts, each replaced by its step*: the triangulator was
   plain ear clipping with hole bridging, O(n^2) per ear, and =prepare.rs=
-  neither culled, decimated nor clipped; step 2 replaced both (§ PREPARE). Outlines are 1-pixel =GL_LINES= (step 5:
-  shader-expanded). =gl::View= stood in for the camera until step 4
-  replaced it.
+  neither culled, decimated nor clipped; step 2 replaced both (§ PREPARE).
+  Outlines were 1-pixel =GL_LINES= until step 5 expanded them in the shader.
+  =gl::View= stood in for the camera until step 4 replaced it.
 - The examples project longitude/latitude to Web Mercator *inside their
   sink*, standing in for =geoscribe=; nazca does no CRS math.
 2. Prepare: cull, decimate, clip, earcut, style-class index (done
@@ -381,7 +444,8 @@ first. The Massachusetts counties go WKB -> =Sink= -> =MeshBuilder= ->
 4. Camera: pan, zoom about a point, rotate, =fit_bounds=, needed-tiles list,
    and the tile-selection trait (done 2026-10-30; § CAMERA, § TILE GRIDS).
 5. =glow= backend: fills, shader-expanded lines, raster with a color lookup,
-   ID-buffer picking.
+   ID-buffer picking (done 2026-10-30; § BACKENDS, § RASTER, § STYLING,
+   § HIT-TESTING).
 6. *Acceptance*: DuckMap's Views mode runs on nazca with everything in
    § MAPLIBRE PARITY, and a layout SVG is produced from the same prepared
    data.

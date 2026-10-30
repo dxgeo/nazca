@@ -66,6 +66,9 @@ pub struct Mesh {
     pub outlines: Vec<u32>,
     /// Point features, one vertex index each.
     pub points: Vec<u32>,
+    /// One per vertex: the feature it belongs to, as
+    /// [`MeshBuilder::set_feature`] set it. What picking returns.
+    pub ids: Vec<u32>,
 }
 
 impl Mesh {
@@ -76,19 +79,21 @@ impl Mesh {
     /// The bytes its buffers hold, which is what uploading it costs: the
     /// size to give [`crate::TileCache::insert`].
     pub fn byte_size(&self) -> usize {
-        4 * (self.vertices.len() + self.fills.len() + self.outlines.len() + self.points.len())
+        4 * (self.vertices.len() + self.fills.len() + self.outlines.len() + self.points.len() + self.ids.len())
     }
 }
 
 /// Builds a [`Mesh`] from geometry fed to it as a [`Sink`]. See the module
 /// docs.
 ///
-/// Set the style class with [`MeshBuilder::set_class`] before each feature.
+/// Set the style class with [`MeshBuilder::set_class`] and the feature id
+/// with [`MeshBuilder::set_feature`] before each feature.
 /// The builder keeps its working buffers between features, so one builder
 /// per tile allocates little beyond the mesh itself.
 pub struct MeshBuilder {
     mesh: Mesh,
     class: f32,
+    feature: u32,
     /// Grid steps from the tile's centre to its edge. Tile-local coordinates
     /// run -1..1, so a local coordinate times this is its grid coordinate.
     half_cells: f64,
@@ -116,8 +121,16 @@ impl MeshBuilder {
         let half_cells = cells / 2.0;
         let clip = half_cells + (detail.guard_px / detail.grid_px).round().max(0.0);
         MeshBuilder {
-            mesh: Mesh { frame, vertices: Vec::new(), fills: Vec::new(), outlines: Vec::new(), points: Vec::new() },
+            mesh: Mesh {
+                frame,
+                vertices: Vec::new(),
+                fills: Vec::new(),
+                outlines: Vec::new(),
+                points: Vec::new(),
+                ids: Vec::new(),
+            },
             class: 0.0,
+            feature: 0,
             half_cells,
             clip,
             pts: Vec::new(),
@@ -144,6 +157,13 @@ impl MeshBuilder {
         self.class = class as f32;
     }
 
+    /// The feature id for the vertices that follow: the embedder's own
+    /// number for the feature, which picking hands back. Nazca keeps no
+    /// attributes (`../project.org` § WHAT NAZCA DOES NOT DO).
+    pub fn set_feature(&mut self, id: u32) {
+        self.feature = id;
+    }
+
     pub fn finish(self) -> Mesh {
         self.mesh
     }
@@ -162,6 +182,7 @@ impl MeshBuilder {
         let index = self.mesh.vertex_count() as u32;
         let s = self.half_cells;
         self.mesh.vertices.extend_from_slice(&[(g[0] / s) as f32, (g[1] / s) as f32, self.class]);
+        self.mesh.ids.push(self.feature);
         index
     }
 
@@ -456,6 +477,21 @@ mod tests {
         assert_eq!(m.vertex_count(), 4);
         assert_eq!(fill_area(&m), 400.0);
         assert_eq!(m.outlines.len(), 8);
+    }
+
+    #[test]
+    fn every_vertex_carries_its_feature() {
+        let mut b = builder();
+        b.set_feature(7);
+        polygon(&mut b, &[&[[-10.0, -10.0], [10.0, -10.0], [10.0, 10.0], [-10.0, 10.0]]]);
+        b.set_feature(u32::MAX);
+        b.point([50.0, 50.0]);
+        b.begin_line();
+        b.points(&[[0.0, 20.0], [30.0, 20.0]]);
+        b.end_line();
+        let m = b.finish();
+        assert_eq!(m.ids, [7, 7, 7, 7, u32::MAX, u32::MAX, u32::MAX]);
+        assert_eq!(m.ids.len(), m.vertex_count());
     }
 
     #[test]
