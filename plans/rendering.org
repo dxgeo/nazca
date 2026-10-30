@@ -4,8 +4,9 @@
 
 * Rendering Pipeline
 
-** STATUS -- DESIGN ONLY, NOT YET IMPLEMENTED
-Written 2026-10-29 from a brainstorming session. The scope it serves
+** STATUS -- v1 slice steps 1--4 implemented; 5 and 6 open
+Written 2026-10-29 from a brainstorming session; § V1 SLICE records what is
+built. The scope it serves
 (interactive and layouts equally, replacing MapLibre in DuckMap, native in
 scope, raster through the tile cache, a globe after parity) is user-decided
 and recorded in [[file:../project.org][../project.org]] § SCOPE. So is the
@@ -82,8 +83,18 @@ the tiles covering a rectangle (an allocation-free iterator; an edge on a
 tile boundary does not pull in the tile beyond, to within a billionth of a
 tile), the level for a resolution (the coarsest that is not magnified), and a
 =TileFrame= mapping map units to tile-local =f32= centred on the tile and
-scaled to +-1. The grid is a concrete type: the selection *trait* above
-depends on the camera, so it arrives with step 4 of § V1 SLICE.
+scaled to +-1. The grid is a concrete type; the selection trait is
+separate, because it depends on the camera.
+
+/Implemented 2026-10-30 (=src/select.rs=):/ =TileSelector::select(&Camera,
+&mut Vec<TileId>)=, implemented on =TileGrid= as the flat selector: one
+level, =level_for_resolution= at the camera's scale, the tiles overlapping
+the viewport, nearest the view's centre first so an embedder fetching in
+order fills the middle of the screen before its edges. A rotated viewport is
+tested exactly (the separating-axis test, in map and in screen axes), not by
+its map-aligned bounds, so a turned map does not fetch the corners of its
+bounding box: a long thin view at 45 degrees needs under a third of the tiles
+its bounds touch. The globe selector will implement the same trait.
 
 ** PREPARE
 - *Cull* by bbox before decoding, using a bbox the source already stores:
@@ -139,6 +150,34 @@ headers. Natively, prepare runs on =std::thread=.
 - The camera reports which tiles it needs; the embedder fetches them and hands
   the bytes to prepare. While a level loads, the parent level is drawn scaled.
 
+/Implemented 2026-10-30 (=src/cache.rs=):/ =TileCache<V>= is generic over
+what it holds, so the embedder's value is an enum of the backend's mesh and
+texture and one budget covers both. Tiles are keyed by =(source, TileId)=,
+the source numbered by the embedder. A frame is =begin_frame=, then per source
+=plan(source, grid, needed, &mut Plan)=, which writes the tiles to draw now
+(coarsest level first) and those to fetch (needed, not cached, not already
+pending; planning marks them pending), then =insert= or =fail= as fetches
+finish.
+- *Stand-ins*: a missing tile is covered by its nearest level of cached
+  ancestors, or failing that by its cached children, so zooming out shows
+  something too. Ancestors are found through the grid (=tiles_in= the
+  tile's bounds at each coarser level), so grids whose levels do not nest
+  work, with several partial ancestors.
+- *Eviction* is least-recently-used by last plan or insert, but never takes a
+  tile the current frame draws: if those alone exceed the budget the cache
+  runs over rather than leave a hole on screen. Using a tile moves it to the
+  back of the order, so eviction stops at the first current-frame tile.
+- *Freeing is the caller's*: GPU objects are not freed by =Drop=, so
+  =insert=, =remove=, =remove_source= and =set_budget= return what they let
+  go of. =Mesh::byte_size= is the size to insert a mesh at.
+- *A fetch that finds nothing* is better inserted as an empty tile than
+  failed: =fail= only clears the pending mark, and when to retry is the
+  embedder's call.
+- Not yet: clipping each tile's drawing to its own bounds (scissor or
+  stencil, step 5). Opaque fills hide the overlap of a stand-in and its
+  loaded neighbours, and of neighbours' guard bands; translucent ones would
+  blend twice there.
+
 ** RASTER -- through the same cache (user decision, 2026-10-29)
 - Store the *raw band*, not colored RGBA: an =R8= texture for a categorical
   band like DuckMap's =lcmap_lcpri=, =R32F= for continuous data. The colormap
@@ -184,6 +223,20 @@ input events.
 *Built on a 4x4 matrix from the start.* v1 uses it only as a flat 2D
 orthographic view, but the type is ready for a perspective globe camera
 without changing the backends or the shaders' interface.
+
+/Implemented 2026-10-30 (=src/camera.rs=):/ =Camera= holds the centre in map
+units, map units per pixel, a bearing and the viewport size. The bearing is
+MapLibre's: radians clockwise from north to the map direction that points up,
+so the map turns counter-clockwise on screen as it grows. =pan_px=,
+=zoom_about= and =rotate_about= keep the map point under the pointer where it
+is; =fit_bounds= frames a rectangle with padding at the current bearing;
+=screen_to_map=, =map_to_screen=, =corners= and =visible_bounds= convert.
+Screen positions are top-left origin, Y down, in whatever pixels the viewport
+is sized in. =matrix(&TileFrame)= is the tile-local to clip-space =mat4=,
+composed in =f64= so a tile's offset from the camera cancels before the cast:
+a hundredth of a pixel at 0.1 m per pixel at Web Mercator's far east edge.
+The =gl= backend's shader takes it as =uniform mat4=. Easing for animated
+moves is not built yet.
 
 ** GLOBE -- after MapLibre parity (user decision, 2026-10-29)
 MapLibre's globe projects Web Mercator to a sphere in the vertex shader. That
@@ -305,21 +358,28 @@ first. The Massachusetts counties go WKB -> =Sink= -> =MeshBuilder= ->
 - *Browser*: =spike-web/=, a separate wasm-bindgen consumer crate with its own
   =[workspace]= (=../../wasm-plan.org=). WebGL 2.0 in Chrome; the release
   wasm was 143 KB, 73 KB gzipped, of which the embedded fixture is 31 KB;
-  with step 2's earcut and prepare it is 176 KB, 84 KB gzipped.
-- Both draw the same mesh from the same shared =examples/spike/data.rs=: 429
-  vertices, 397 triangles, 429 outline segments (unchanged by step 2's
-  prepare, at the spike's fine 8192-pixel detail).
+  with step 2's earcut and prepare it is 176 KB, 84 KB gzipped; with steps 3
+  and 4, 212 KB, 99 KB gzipped.
+- Both share =examples/spike/data.rs= (the counties as WKB with their stored
+  bounds, prepared per tile on request) and =examples/spike/tiles.rs= (the
+  frame loop: select, plan, prepare and upload what is missing, draw). Since
+  step 4 they draw 512-pixel Web Mercator tiles through the camera, selector
+  and cache, and right-drag rotates; the native spike takes =--bearing
+  degrees=. Preparing is synchronous there, so stand-ins are never seen; the
+  fit-to-state opening view at 1800x1400 is 36 level-9 tiles, 20 KB.
 - *Spike-quality parts, each replaced by its step*: the triangulator was
   plain ear clipping with hole bridging, O(n^2) per ear, and =prepare.rs=
   neither culled, decimated nor clipped; step 2 replaced both (§ PREPARE). Outlines are 1-pixel =GL_LINES= (step 5:
-  shader-expanded). =gl::View= stands in for the camera (step 4).
+  shader-expanded). =gl::View= stood in for the camera until step 4
+  replaced it.
 - The examples project longitude/latitude to Web Mercator *inside their
   sink*, standing in for =geoscribe=; nazca does no CRS math.
 2. Prepare: cull, decimate, clip, earcut, style-class index (done
    2026-10-29; § PREPARE).
-3. Tile cache with a byte budget, vector and raster.
+3. Tile cache with a byte budget, vector and raster (done 2026-10-30;
+   § TILE CACHE).
 4. Camera: pan, zoom about a point, rotate, =fit_bounds=, needed-tiles list,
-   and the tile-selection trait (§ TILE GRIDS).
+   and the tile-selection trait (done 2026-10-30; § CAMERA, § TILE GRIDS).
 5. =glow= backend: fills, shader-expanded lines, raster with a color lookup,
    ID-buffer picking.
 6. *Acceptance*: DuckMap's Views mode runs on nazca with everything in

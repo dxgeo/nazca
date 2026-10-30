@@ -1,9 +1,10 @@
 //! What both spikes draw -- the native one (`main.rs`) and the browser one
 //! (`spike-web/`, which includes this file): the Massachusetts counties from
-//! nazca's WKB fixture, projected to Web Mercator and prepared into one mesh.
+//! nazca's WKB fixture, projected to Web Mercator and prepared tile by tile
+//! as the camera asks for them.
 
-use nazca::grid::{Rect, TileFrame};
-use nazca::{Detail, Mesh, MeshBuilder, Sink, wkb};
+use nazca::grid::Rect;
+use nazca::{Detail, Mesh, MeshBuilder, Sink, TileGrid, TileId, wkb};
 
 const TSV: &str = include_str!("../../tests/fixtures/counties_sample.tsv");
 
@@ -53,32 +54,51 @@ fn massachusetts() -> impl Iterator<Item = Vec<&'static str>> {
     TSV.lines().skip(1).map(|l| l.split('\t').collect::<Vec<_>>()).filter(|f| f[0].starts_with("25"))
 }
 
-/// The counties as one mesh, and their bounds in Web Mercator metres.
-pub fn counties() -> (Mesh, Rect) {
-    // The fixture carries each county's bounds (DuckDB's), so the frame can
-    // be fixed before any geometry is read. Mercator preserves the order of
-    // coordinates, so projected corners bound the projected shapes.
-    let mut bounds = Rect { min: [f64::MAX; 2], max: [f64::MIN; 2] };
-    for f in massachusetts() {
-        let lo = project([f[6].parse().unwrap(), f[7].parse().unwrap()]);
-        let hi = project([f[8].parse().unwrap(), f[9].parse().unwrap()]);
-        bounds.min = [bounds.min[0].min(lo[0]), bounds.min[1].min(lo[1])];
-        bounds.max = [bounds.max[0].max(hi[0]), bounds.max[1].max(hi[1])];
-    }
-    let frame = TileFrame {
-        center: [(bounds.min[0] + bounds.max[0]) / 2.0, (bounds.min[1] + bounds.max[1]) / 2.0],
-        half_span: (bounds.max[0] - bounds.min[0]).max(bounds.max[1] - bounds.min[1]) / 2.0,
-    };
+struct County {
+    /// In Web Mercator metres.
+    bounds: Rect,
+    wkb: Vec<u8>,
+    class: u8,
+}
 
-    // One mesh drawn at every zoom (there are no tiles in the spike), so
-    // prepare it finely: 8192 pixels across the state, a sixteenth of a pixel
-    // at the opening view.
-    let mut builder = MeshBuilder::new(frame, Detail { tile_px: 8192.0, ..Detail::default() });
-    for (i, f) in massachusetts().enumerate() {
-        builder.set_class(1 + (i % 6) as u8);
-        wkb::read(&hex(f[10]), &mut ToWebMercator(&mut builder)).unwrap();
+/// The counties, held as WKB the way a tile source would hold them, each
+/// with the bounds it stores (DuckDB's) for culling.
+pub struct Counties {
+    counties: Vec<County>,
+    /// All of them, in Web Mercator metres.
+    pub bounds: Rect,
+}
+
+impl Counties {
+    pub fn load() -> Counties {
+        let mut bounds = Rect { min: [f64::MAX; 2], max: [f64::MIN; 2] };
+        let counties: Vec<County> = massachusetts()
+            .enumerate()
+            .map(|(i, f)| {
+                // Mercator preserves the order of coordinates, so projected
+                // corners bound the projected shapes.
+                let lo = project([f[6].parse().unwrap(), f[7].parse().unwrap()]);
+                let hi = project([f[8].parse().unwrap(), f[9].parse().unwrap()]);
+                bounds.min = [bounds.min[0].min(lo[0]), bounds.min[1].min(lo[1])];
+                bounds.max = [bounds.max[0].max(hi[0]), bounds.max[1].max(hi[1])];
+                County { bounds: Rect { min: lo, max: hi }, wkb: hex(f[10]), class: 1 + (i % 6) as u8 }
+            })
+            .collect();
+        Counties { counties, bounds }
     }
-    (builder.finish(), bounds)
+
+    /// Prepares tile `id` of `grid`, as a tile route would serve it: the
+    /// counties whose stored bounds reach the tile or its guard band, clipped
+    /// to it.
+    pub fn prepare(&self, grid: &TileGrid, id: TileId) -> Mesh {
+        let mut builder = MeshBuilder::for_tile(grid, id).unwrap();
+        let reach = grid.bounds(id).unwrap().expand(Detail::default().guard_px * grid.resolution(id.z).unwrap());
+        for c in self.counties.iter().filter(|c| c.bounds.intersects(&reach)) {
+            builder.set_class(c.class);
+            wkb::read(&c.wkb, &mut ToWebMercator(&mut builder)).unwrap();
+        }
+        builder.finish()
+    }
 }
 
 /// Class 0 unused, then six muted fills for neighbouring counties.

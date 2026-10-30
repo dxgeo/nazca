@@ -37,6 +37,22 @@ pub struct Rect {
     pub max: [f64; 2],
 }
 
+impl Rect {
+    pub fn center(&self) -> [f64; 2] {
+        [(self.min[0] + self.max[0]) / 2.0, (self.min[1] + self.max[1]) / 2.0]
+    }
+
+    /// The rectangle grown by `by` map units on every side.
+    pub fn expand(&self, by: f64) -> Rect {
+        Rect { min: [self.min[0] - by, self.min[1] - by], max: [self.max[0] + by, self.max[1] + by] }
+    }
+
+    /// Whether the two share any area or boundary.
+    pub fn intersects(&self, other: &Rect) -> bool {
+        self.min[0] <= other.max[0] && other.min[0] <= self.max[0] && self.min[1] <= other.max[1] && other.min[1] <= self.max[1]
+    }
+}
+
 /// One level of a grid: the span of a tile's edge in map units (tiles are
 /// square) and the grid's size in tiles.
 #[derive(Debug, Clone, Copy, PartialEq)]

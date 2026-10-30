@@ -5,21 +5,29 @@
 //! Geometry reaches nazca through a [`Sink`]: either nazca's own streaming
 //! [`wkb`] reader drives one, or a caller's adapter over any other source
 //! does. A [`TileGrid`] cuts the map's plane into the tiles it is prepared
-//! and drawn in.
+//! and drawn in; a [`Camera`] says which part of the plane is on screen, a
+//! [`TileSelector`] which tiles that needs, and a [`TileCache`] keeps the
+//! prepared ones between frames.
 //!
 //! Everything but the `gl` backend is free of `unsafe`. `glow`'s calls are
 //! all `unsafe fn`, so `gl` alone is allowed it; `forbid` cannot be lifted for
 //! one module, hence `deny`.
 #![deny(unsafe_code)]
 
+pub mod cache;
+pub mod camera;
 pub mod earcut;
 #[cfg(feature = "gl")]
 pub mod gl;
 pub mod grid;
 pub mod prepare;
+pub mod select;
 pub mod sink;
 pub mod wkb;
 
+pub use cache::{Plan, TileCache, TileKey};
+pub use camera::Camera;
 pub use grid::{TileGrid, TileId};
 pub use prepare::{Detail, Mesh, MeshBuilder};
+pub use select::TileSelector;
 pub use sink::Sink;

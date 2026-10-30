@@ -13,9 +13,10 @@ that math needs. Its plans went with it (`geoscribe/plans/reprojection.org`,
 Like its siblings [Geosetta](https://github.com/dxgeo/geosetta) and Geoscribe,
 Nazca depends on neither of them, and neither depends on it.
 
-**Status: early.** A streaming WKB reader, the geometry `Sink` trait and tile
-grids exist, and a spike draws polygons with OpenGL natively and WebGL2 in a
-browser (`examples/spike`, `spike-web/`). Scope is in [`project.org`](project.org); the pipeline
+**Status: early.** A streaming WKB reader, the geometry `Sink` trait, tile
+grids, tile preparation, a tile cache and a camera exist, and a spike draws
+tiled polygons through them with OpenGL natively and WebGL2 in a browser
+(`examples/spike`, `spike-web/`). Scope is in [`project.org`](project.org); the pipeline
 design is in [`plans/rendering.org`](plans/rendering.org).
 
 ## License

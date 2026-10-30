@@ -72,6 +72,12 @@ impl Mesh {
     pub fn vertex_count(&self) -> usize {
         self.vertices.len() / 3
     }
+
+    /// The bytes its buffers hold, which is what uploading it costs: the
+    /// size to give [`crate::TileCache::insert`].
+    pub fn byte_size(&self) -> usize {
+        4 * (self.vertices.len() + self.fills.len() + self.outlines.len() + self.points.len())
+    }
 }
 
 /// Builds a [`Mesh`] from geometry fed to it as a [`Sink`]. See the module

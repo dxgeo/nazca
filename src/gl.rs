@@ -2,15 +2,16 @@
 //! natively. Enabled by the `gl` feature.
 //!
 //! *Spike quality*: it uploads a [`Mesh`] and draws its fills in the palette
-//! colour of each vertex's style class and its outlines as 1-pixel GL lines.
-//! Shader-expanded lines, raster, picking and the tile cache come later
-//! (`../plans/rendering.org` § V1 SLICE).
+//! colour of each vertex's style class and its outlines as 1-pixel GL lines,
+//! placed by a [`Camera`]'s matrix. Shader-expanded lines, raster and picking
+//! come with step 5 (`../plans/rendering.org` § V1 SLICE).
 //!
 //! This is the one module allowed `unsafe`: every `glow` call is an
 //! `unsafe fn`, because GL itself checks nothing. The crate denies `unsafe`
 //! everywhere else.
 #![allow(unsafe_code)]
 
+use crate::camera::Camera;
 use crate::grid::TileFrame;
 use crate::prepare::Mesh;
 use glow::HasContext;
@@ -21,11 +22,10 @@ pub const PALETTE_SIZE: usize = 16;
 const VERTEX: &str = r#"
 in vec2 a_pos;
 in float a_class;
-uniform mat3 u_transform;
+uniform mat4 u_matrix;
 flat out int v_class;
 void main() {
-    vec3 p = u_transform * vec3(a_pos, 1.0);
-    gl_Position = vec4(p.xy, 0.0, 1.0);
+    gl_Position = u_matrix * vec4(a_pos, 0.0, 1.0);
     v_class = int(a_class + 0.5);
 }
 "#;
@@ -41,35 +41,10 @@ void main() {
 }
 "#;
 
-/// What part of the map the viewport shows: the map point at its centre, and
-/// how many map units one pixel spans. *Spike*: the camera (step 4) replaces
-/// this.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct View {
-    pub center: [f64; 2],
-    pub units_per_px: f64,
-    pub size_px: [u32; 2],
-}
-
-impl View {
-    /// The matrix taking `frame`'s tile-local coordinates to clip space,
-    /// column-major. Composed in `f64` and only then cast, so the large map
-    /// offsets cancel before any precision is lost.
-    pub fn transform(&self, frame: &TileFrame) -> [f32; 9] {
-        let half_w = self.units_per_px * self.size_px[0] as f64 / 2.0;
-        let half_h = self.units_per_px * self.size_px[1] as f64 / 2.0;
-        let sx = frame.half_span / half_w;
-        let sy = frame.half_span / half_h;
-        let tx = (frame.center[0] - self.center[0]) / half_w;
-        let ty = (frame.center[1] - self.center[1]) / half_h;
-        [sx as f32, 0.0, 0.0, 0.0, sy as f32, 0.0, tx as f32, ty as f32, 1.0]
-    }
-}
-
 /// The compiled shaders, built once per GL context.
 pub struct Renderer {
     program: glow::Program,
-    u_transform: Option<glow::UniformLocation>,
+    u_matrix: Option<glow::UniformLocation>,
     u_palette: Option<glow::UniformLocation>,
     u_line: Option<glow::UniformLocation>,
     u_lines: Option<glow::UniformLocation>,
@@ -120,7 +95,7 @@ impl Renderer {
             }
             Ok(Renderer {
                 program,
-                u_transform: gl.get_uniform_location(program, "u_transform"),
+                u_matrix: gl.get_uniform_location(program, "u_matrix"),
                 u_palette: gl.get_uniform_location(program, "u_palette"),
                 u_line: gl.get_uniform_location(program, "u_line"),
                 u_lines: gl.get_uniform_location(program, "u_lines"),
@@ -162,15 +137,15 @@ impl Renderer {
         }
     }
 
-    /// Draws `mesh`: fills in `palette[class]`, then outlines in `line`.
-    /// Colours are linear RGBA in 0..1.
-    pub fn draw(&self, gl: &glow::Context, mesh: &GpuMesh, view: &View, palette: &[[f32; 4]; PALETTE_SIZE], line: [f32; 4]) {
+    /// Draws `mesh` where `camera` puts it: fills in `palette[class]`, then
+    /// outlines in `line`. Colours are linear RGBA in 0..1.
+    pub fn draw(&self, gl: &glow::Context, mesh: &GpuMesh, camera: &Camera, palette: &[[f32; 4]; PALETTE_SIZE], line: [f32; 4]) {
         let palette: Vec<f32> = palette.iter().flatten().copied().collect();
         // SAFETY: binds this renderer's program and the mesh's own VAO, and
         // draws index ranges that lie inside the uploaded index buffer.
         unsafe {
             gl.use_program(Some(self.program));
-            gl.uniform_matrix_3_f32_slice(self.u_transform.as_ref(), false, &view.transform(&mesh.frame));
+            gl.uniform_matrix_4_f32_slice(self.u_matrix.as_ref(), false, &camera.matrix(&mesh.frame));
             gl.uniform_4_f32_slice(self.u_palette.as_ref(), &palette);
             gl.uniform_4_f32_slice(self.u_line.as_ref(), &line);
             gl.bind_vertex_array(Some(mesh.vao));

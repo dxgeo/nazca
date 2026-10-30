@@ -1,14 +1,18 @@
 //! The native half of the `glow` spike (`plans/rendering.org` § V1 SLICE):
-//! the Massachusetts counties, drawn by nazca's `gl` backend in a winit
+//! the Massachusetts counties, prepared tile by tile through nazca's camera,
+//! tile selector and tile cache and drawn by its `gl` backend in a winit
 //! window over an OpenGL 3.3 core context. Drag to pan, scroll to zoom about
-//! the cursor.
+//! the cursor, right-drag to rotate about the window's centre.
 //!
 //!   cargo run -p nazca --features gl --example spike
 //!   cargo run -p nazca --features gl --example spike -- --screenshot out.png
+//!   cargo run -p nazca --features gl --example spike -- --bearing 30
 //!
-//! `--screenshot` draws one frame, writes it as a PNG and exits.
+//! `--screenshot` draws one frame, writes it as a PNG and exits. `--bearing`
+//! opens the map turned that many degrees, east of north up.
 
 mod data;
+mod tiles;
 
 use glutin::config::{ConfigTemplateBuilder, GlConfig};
 use glutin::context::{ContextApi, ContextAttributesBuilder, GlProfile, NotCurrentGlContext, PossiblyCurrentContext, Version};
@@ -16,12 +20,13 @@ use glutin::display::{GetGlDisplay, GlDisplay};
 use glutin::surface::{GlSurface, Surface, WindowSurface};
 use glutin_winit::{DisplayBuilder, GlWindow};
 use glow::HasContext;
-use nazca::gl::{GpuMesh, Renderer, View};
-use nazca::grid::Rect;
+use nazca::Camera;
+use nazca::gl::Renderer;
 use raw_window_handle::HasWindowHandle;
 use std::num::NonZeroU32;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
+use tiles::TiledMap;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId};
@@ -32,22 +37,23 @@ struct Gfx {
     context: PossiblyCurrentContext,
     gl: glow::Context,
     renderer: Renderer,
-    mesh: GpuMesh,
 }
 
 struct App {
     screenshot: Option<String>,
-    bounds: Rect,
+    bearing: f64,
+    map: TiledMap,
     gfx: Option<Gfx>,
-    view: Option<View>,
+    camera: Option<Camera>,
     cursor: PhysicalPosition<f64>,
     dragging: bool,
+    rotating: bool,
 }
 
 impl App {
     fn redraw(&mut self) {
-        let (Some(g), Some(view)) = (&self.gfx, &self.view) else { return };
-        let [w, h] = view.size_px;
+        let (Some(g), Some(camera)) = (&self.gfx, &self.camera) else { return };
+        let [w, h] = camera.size_px;
         let [r, gr, b, a] = data::BACKGROUND;
         // SAFETY: plain state and clear calls on the current context.
         unsafe {
@@ -55,7 +61,17 @@ impl App {
             g.gl.clear_color(r, gr, b, a);
             g.gl.clear(glow::COLOR_BUFFER_BIT);
         }
-        g.renderer.draw(&g.gl, &g.mesh, view, &data::PALETTE, data::OUTLINE);
+        let stats = self.map.draw(&g.gl, &g.renderer, camera);
+        if stats.prepared > 0 {
+            println!(
+                "level {}: {} tiles drawn, {} prepared; {} cached, {} KB",
+                stats.level,
+                stats.drawn,
+                stats.prepared,
+                stats.cached,
+                stats.cached_bytes / 1024
+            );
+        }
 
         if let Some(path) = self.screenshot.take() {
             let mut pixels = vec![0u8; (w * h * 4) as usize];
@@ -76,13 +92,6 @@ impl App {
         g.surface.swap_buffers(&g.context).unwrap();
     }
 
-    /// The map point under a pixel position.
-    fn map_point(view: &View, px: PhysicalPosition<f64>) -> [f64; 2] {
-        [
-            view.center[0] + (px.x - view.size_px[0] as f64 / 2.0) * view.units_per_px,
-            view.center[1] - (px.y - view.size_px[1] as f64 / 2.0) * view.units_per_px,
-        ]
-    }
 }
 
 impl ApplicationHandler for App {
@@ -114,46 +123,42 @@ impl ApplicationHandler for App {
         };
         println!("GL: {}", unsafe { gl.get_parameter_string(glow::VERSION) });
 
-        let (mesh, _) = data::counties();
-        println!(
-            "{} vertices, {} triangles, {} outline segments",
-            mesh.vertex_count(),
-            mesh.fills.len() / 3,
-            mesh.outlines.len() / 2
-        );
         let renderer = Renderer::new(&gl).unwrap();
-        let gpu = renderer.upload(&gl, &mesh).unwrap();
 
         // Fit the counties, with a margin.
         let size = window.inner_size();
-        let b = self.bounds;
-        let units_per_px = ((b.max[0] - b.min[0]) / size.width as f64).max((b.max[1] - b.min[1]) / size.height as f64) * 1.08;
-        self.view = Some(View {
-            center: [(b.min[0] + b.max[0]) / 2.0, (b.min[1] + b.max[1]) / 2.0],
-            units_per_px,
-            size_px: [size.width, size.height],
-        });
+        let mut camera = Camera::new([0.0, 0.0], 1.0, [size.width, size.height]);
+        camera.bearing = self.bearing.to_radians();
+        camera.fit_bounds(self.map.bounds(), 0.04 * size.width.min(size.height) as f64);
+        self.camera = Some(camera);
         window.request_redraw();
-        self.gfx = Some(Gfx { window, surface, context, gl, renderer, mesh: gpu });
+        self.gfx = Some(Gfx { window, surface, context, gl, renderer });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-        let Some(view) = self.view.as_mut() else { return };
+        let Some(camera) = self.camera.as_mut() else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
                 if let Some(g) = &self.gfx {
                     g.surface.resize(&g.context, NonZeroU32::new(size.width).unwrap(), NonZeroU32::new(size.height).unwrap());
                 }
-                view.size_px = [size.width, size.height];
+                camera.resize([size.width, size.height]);
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 self.dragging = state == ElementState::Pressed;
             }
+            WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
+                self.rotating = state == ElementState::Pressed;
+            }
             WindowEvent::CursorMoved { position, .. } => {
+                let delta = [position.x - self.cursor.x, position.y - self.cursor.y];
                 if self.dragging {
-                    view.center[0] -= (position.x - self.cursor.x) * view.units_per_px;
-                    view.center[1] += (position.y - self.cursor.y) * view.units_per_px;
+                    camera.pan_px(delta);
+                } else if self.rotating {
+                    // A full turn per window width.
+                    let [w, h] = camera.size_px.map(|v| v as f64);
+                    camera.rotate_about([w / 2.0, h / 2.0], delta[0] / w * std::f64::consts::TAU);
                 }
                 self.cursor = position;
             }
@@ -162,11 +167,7 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => y as f64,
                     MouseScrollDelta::PixelDelta(p) => p.y / 50.0,
                 };
-                // Zoom about the cursor: the map point under it stays put.
-                let anchor = App::map_point(view, self.cursor);
-                view.units_per_px *= 1.15f64.powf(-steps);
-                let moved = App::map_point(view, self.cursor);
-                view.center = [view.center[0] + anchor[0] - moved[0], view.center[1] + anchor[1] - moved[1]];
+                camera.zoom_about([self.cursor.x, self.cursor.y], 1.15f64.powf(steps));
             }
             WindowEvent::RedrawRequested => {
                 self.redraw();
@@ -181,17 +182,30 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let screenshot = match (args.next().as_deref(), args.next()) {
-        (Some("--screenshot"), Some(path)) => Some(path),
-        (None, _) => None,
-        _ => {
-            eprintln!("usage: spike [--screenshot out.png]");
-            std::process::exit(2);
-        }
+    let usage = || -> ! {
+        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees]");
+        std::process::exit(2);
     };
-    let (_, bounds) = data::counties();
+    let (mut screenshot, mut bearing) = (None, 0.0);
+    let mut args = std::env::args().skip(1);
+    while let Some(flag) = args.next() {
+        let value = args.next().unwrap_or_else(|| usage());
+        match flag.as_str() {
+            "--screenshot" => screenshot = Some(value),
+            "--bearing" => bearing = value.parse().unwrap_or_else(|_| usage()),
+            _ => usage(),
+        }
+    }
     let event_loop = EventLoop::new().unwrap();
-    let mut app = App { screenshot, bounds, gfx: None, view: None, cursor: PhysicalPosition::new(0.0, 0.0), dragging: false };
+    let mut app = App {
+        screenshot,
+        bearing,
+        map: TiledMap::new(16 << 20),
+        gfx: None,
+        camera: None,
+        cursor: PhysicalPosition::new(0.0, 0.0),
+        dragging: false,
+        rotating: false,
+    };
     event_loop.run_app(&mut app).unwrap();
 }
