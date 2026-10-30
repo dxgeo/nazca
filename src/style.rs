@@ -58,6 +58,38 @@ impl Palette {
     }
 }
 
+/// A value that follows the zoom: MapLibre's `["interpolate", ["linear" |
+/// ["exponential", base]], ["zoom"], z0, v0, z1, v1, ...]`, over `stops` of
+/// `(zoom, value)` in ascending zoom. `base` 1 is linear; above 1 the value
+/// changes faster at the high end of each stop. Before the first stop and
+/// after the last the end value holds. Zoom comes from
+/// [`crate::TileGrid::fractional_level`].
+///
+/// Styles stay plain values (`../plans/rendering.org` § STYLING): an
+/// embedder evaluates its curves at the camera's zoom when the zoom changes
+/// and rewrites the palette, one small upload.
+pub fn interpolate(stops: &[(f64, f32)], base: f64, zoom: f64) -> f32 {
+    let Some(&(z_first, v_first)) = stops.first() else { return 0.0 };
+    if zoom <= z_first {
+        return v_first;
+    }
+    for w in stops.windows(2) {
+        let ((z0, v0), (z1, v1)) = (w[0], w[1]);
+        if zoom <= z1 {
+            let span = z1 - z0;
+            let t = if span <= 0.0 {
+                1.0
+            } else if (base - 1.0).abs() < 1e-12 {
+                (zoom - z0) / span
+            } else {
+                (base.powf(zoom - z0) - 1.0) / (base.powf(span) - 1.0)
+            };
+            return v0 + (v1 - v0) * t as f32;
+        }
+    }
+    stops[stops.len() - 1].1
+}
+
 /// The lookup that colours a raster band: 256 RGBA8 entries, indexed by the
 /// value for a categorical band, or spread evenly over `domain` for a
 /// continuous one.
@@ -118,6 +150,19 @@ mod tests {
         let s = Style { fill: [1.0, 0.0, 0.0, 1.0], line_width: 2.0, ..Style::default() };
         p.set(200, s);
         assert_eq!(*p.get(200), s);
+    }
+
+    #[test]
+    fn zoom_curves_interpolate_like_maplibre() {
+        // DuckMap's city circles: radius 1 at z3 to 5 at z10.
+        let stops = [(3.0, 1.0), (10.0, 5.0)];
+        assert_eq!(interpolate(&stops, 1.0, 0.0), 1.0);
+        assert_eq!(interpolate(&stops, 1.0, 6.5), 3.0);
+        assert_eq!(interpolate(&stops, 1.0, 14.0), 5.0);
+        // Exponential base 2 between z0 and z2: a third of the way by z1.
+        let e = interpolate(&[(0.0, 0.0), (2.0, 3.0)], 2.0, 1.0);
+        assert!((e - 1.0).abs() < 1e-6, "{e}");
+        assert_eq!(interpolate(&[], 1.0, 5.0), 0.0);
     }
 
     #[test]

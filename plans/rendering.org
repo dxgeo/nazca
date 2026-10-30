@@ -4,7 +4,7 @@
 
 * Rendering Pipeline
 
-** STATUS -- v1 slice steps 1--5 implemented; 6 open
+** STATUS -- v1 slice steps 1--5 implemented; 6 half done (nazca's side)
 Written 2026-10-29 from a brainstorming session; § V1 SLICE records what is
 built. The scope it serves
 (interactive and layouts equally, replacing MapLibre in DuckMap, native in
@@ -231,6 +231,15 @@ read by =texelFetch=; =update_palette= restyles in one upload. Visibility
 and min/max zoom are the embedder's for now: it chooses which layers to
 draw.
 
+/Zoom-dependent values, 2026-10-30:/ DuckMap's =circle-radius= follows
+=["interpolate", ["linear"], ["zoom"], 3, 1, 10, 5]=. =style::interpolate(stops,
+base, zoom)= evaluates MapLibre's linear and exponential curves, and
+=TileGrid::fractional_level(units_per_px)= gives the zoom: on the 512-pixel
+Web Mercator grid it is MapLibre's zoom exactly, and any grid has one. The
+style stays plain values: the embedder re-evaluates its curves when the
+zoom changes and rewrites the palette, one small upload, rather than nazca
+growing an expression language.
+
 ** HIT-TESTING
 - *ID-buffer picking*: render feature ids to an offscreen buffer and read back
   one pixel. Returns =(layer, feature_id)=; the embedder fetches attributes
@@ -357,9 +366,28 @@ Not a backend but also feature-gated: =mvt= (decoder, no dependency;
   overlap (darker dots at vertices), and a border two polygons share is
   outlined by both. Neither shows with opaque lines; MapLibre parity needs
   no =line-opacity=.
-- The draw-command buffer above is not built: the =gl= backend is driven
-  directly. It arrives with the SVG backend (step 6), when there is a
-  second backend to share it.
+- /Changed 2026-10-30, with the SVG backend: no separate draw-command
+  buffer./ The prepared =Mesh= is already flat =f32= / =u32= buffers, and it
+  is what both backends replay. The GPU takes its triangles and outline
+  segments; SVG takes its polygon rings (=Mesh::rings= and =Mesh::polygons=,
+  added for it: a path is filled from rings, not triangles, whose seams
+  would show) and the same outline segments. An opcode stream between them
+  would be a second copy of the same data.
+
+/The SVG backend, implemented 2026-10-30 (=src/svg.rs=):/ =SvgWriter= in the
+default build. Per mesh: one =<path>= a polygon (=fill-rule="evenodd"= for
+its holes), then the outline segments chained back into polylines in one
+=<path>= per class -- exactly the segments the GPU strokes, so edges that
+clipping made are not stroked here either -- then a =<circle>= per point.
+Styles are CSS classes written once, named per layer so two layers' palettes
+cannot collide; coordinates are written to a hundredth of a pixel. A layout
+prepares its one view with =MeshBuilder::for_view(&camera)=: a frame around
+what the camera shows, at the camera's own resolution, so a 150 dpi page
+keeps more vertices than the screen. Rasters are not written (an SVG image
+needs encoded bytes, the =raster= backend's job). =examples/layout.rs= draws
+an 8 x 6 inch page at 150 dpi: the MLT basemap tile under the WKB counties,
+north up or turned, 37 KB of SVG; rendered with =rsvg-convert= the two
+sources register exactly.
 
 ** LABELS -- after MapLibre parity (user decision, 2026-10-29)
 Interactive labels must stay put across pan and zoom without flicker, which
@@ -381,9 +409,13 @@ What =DuckMap/ingestion/web/interactive_map.html= uses from MapLibre, as of
 - Interaction: click to popup, navigation control (zoom/rotate), =fitBounds=,
   =load= and =error= events.
 
-DuckMap's own tile route can serve WKB per tile (clipped and simplified by
-DuckDB) instead of MVT once nazca is the client, so its tiles need no
-decoder. The third-party basemap still arrives as MVT inside PMTiles.
+*DuckMap's own tile route serves WKB per tile* (user decision, 2026-10-30),
+clipped and simplified by DuckDB, so its tiles need no decoder and skip
+MVT's integer quantization; popups need a label sidecar beside it. *The
+nazca client is a new page beside the MapLibre one* (user decision,
+2026-10-30), so the two can be compared until parity is confirmed. The
+basemap still arrives inside PMTiles, as MVT or as MLT: DuckMap's
+=basemaps= table carries both.
 
 *MVT decoding lives in nazca, behind an =mvt= feature* (user decision,
 2026-10-29). A few hundred lines: protobuf varints, the MVT geometry command
@@ -392,6 +424,41 @@ stream, feeding the sink directly with no intermediate geometry. Chosen over
 converter for it. Only geometry and feature ids are decoded; MVT properties
 are skipped, matching nazca not holding attributes. Reading the PMTiles
 container (a directory lookup over byte ranges) is the embedder's I/O.
+
+/Implemented 2026-10-30 (=src/mvt.rs=)/, with *MLT beside it* (user,
+2026-10-30: the basemap ships in both encodings), behind an =mlt= feature
+(=src/mlt.rs=), also with no dependency.
+- *MVT*: tiles, layers and features iterate over the borrowed bytes;
+  =Feature::read(bounds, sink)= decodes the command stream straight into a
+  =Sink= in map units. Polygon rings are grouped by winding, as MVT 2
+  defines.
+- *MLT v1*, the stable format, from the specification at
+  =maplibre/maplibre-tile-spec= (commit =71f20ee=). Columnar, so a layer
+  decodes whole: =Layer::decode()= reads the geometry and id columns into
+  =Features= and parses every property column only far enough to skip it;
+  =Features::read(i, bounds, sink)= feeds one feature. Every integer
+  encoding a geometry or id stream can name is read: fixed-width, varint and
+  the v1 SIMD-FastPFOR (256-value big-endian blocks, from the spec and the
+  reference TypeScript decoder); delta, RLE and delta-RLE; vertices plain,
+  componentwise-delta, dictionary and Morton. Polygons take their rings from
+  the topology streams, not from winding, as the spec requires.
+  Pre-tessellated triangles are skipped: their indices count vertices before
+  nazca's snapping and clipping. Frames of other tags (the experimental v2)
+  are skipped, as the spec requires of an unknown tag.
+- *Verified* (=tests/vector_tiles.rs=): all 366 v1 conformance fixtures of
+  the MLT specification decode to the geometry and ids their expected GeoJSON
+  gives, and the four cross-language FastPFOR vectors decode
+  (=tests/fixtures/fetch_mlt_fixtures.sh=; the spec's test data is licensed
+  per source, so it is fetched locally, not checked in). One Massachusetts
+  basemap tile in both encodings is checked in (=tests/fixtures/basemap/=,
+  census-derived) and decodes to the same geometry from both; locally, eight
+  tile pairs from z0 to z6 do (=make_basemap_fixtures.sh=).
+- *Finding*: the tiler that built DuckMap's basemap (freestiler 0.3.0) writes
+  MLT's 64-bit feature-id deltas without the zigzag encoding v1 requires
+  ("each difference is zigzag-encoded ... whatever the stream's type"), so a
+  conforming decoder reads them as wrapped negatives. nazca follows the spec
+  and does not guess the writer. The basemap is never picked, so nothing
+  depends on those ids; the geometry is unaffected.
 
 ** WHAT MOVES OUT OF DUCKMAP
 =DuckMap/crates/duckmap-core/src/render.rs= is the starting material, but it
@@ -449,6 +516,13 @@ first. The Massachusetts counties go WKB -> =Sink= -> =MeshBuilder= ->
 6. *Acceptance*: DuckMap's Views mode runs on nazca with everything in
    § MAPLIBRE PARITY, and a layout SVG is produced from the same prepared
    data.
+   - /nazca's side, done 2026-10-30:/ the =mvt= and =mlt= decoders
+     (§ MAPLIBRE PARITY), zoom-dependent styles (§ STYLING), and the SVG
+     backend with =MeshBuilder::for_view= (§ BACKENDS).
+   - /DuckMap's side, next:/ a =duckmap-nazca= wasm consumer crate and a
+     page beside =interactive_map.html=; the WKB tile route and its label
+     sidecar in =duckmap-tiles=; the embedder's PMTiles directory reader;
+     raster tiles decoded from PNG into =Band::Rgba=.
 
 *So v1 does not foreclose the globe* (§ GLOBE), it must also have:
 - a camera built on a 4x4 matrix (§ CAMERA);

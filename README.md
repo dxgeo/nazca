@@ -15,9 +15,10 @@ Nazca depends on neither of them, and neither depends on it.
 
 **Status: early.** A streaming WKB reader, the geometry `Sink` trait, tile
 grids, tile preparation, a tile cache, a camera and an OpenGL/WebGL2 backend
-(styled fills and lines, colormapped rasters, picking) exist, and a spike
-draws and picks tiled polygons through them natively and in a browser
-(`examples/spike`, `spike-web/`). Scope is in [`project.org`](project.org); the pipeline
+(styled fills and lines, colormapped rasters, picking), an SVG backend for
+layouts, and MVT and MLT decoders (features `mvt`, `mlt`) exist. A spike
+draws and picks tiled polygons natively and in a browser (`examples/spike`,
+`spike-web/`), and `examples/layout.rs` writes a layout SVG. Scope is in [`project.org`](project.org); the pipeline
 design is in [`plans/rendering.org`](plans/rendering.org).
 
 ## License

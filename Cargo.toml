@@ -15,12 +15,19 @@ path = "src/lib.rs"
 # POLICY). Each feature adds pure-Rust crates that build for
 # wasm32-unknown-unknown unmodified.
 gl = ["dep:glow"]
+# Vector tile decoders for basemaps, hand-written: no dependency.
+mvt = []
+mlt = []
 
 [dependencies]
 # Nazca does not depend on `geosetta` or `geoscribe`, and they do not depend on
 # it: the three crates are peers that compose by piping text between their
 # CLIs, or by a caller that links several of them (see ../../architecture.org).
 glow = { version = "0.18.0", optional = true }
+
+# Reads the MLT conformance fixtures' expected GeoJSON in tests.
+[dev-dependencies]
+serde_json = "1"
 
 # The native spike example's window and GL context, and its --screenshot
 # output. Never needed by the library; not built for wasm targets.
@@ -30,6 +37,14 @@ glutin-winit = "0.5.0"
 winit = "0.30.13"
 raw-window-handle = "0.6.2"
 png = "0.18.1"
+
+[[test]]
+name = "vector_tiles"
+required-features = ["mvt", "mlt"]
+
+[[example]]
+name = "layout"
+required-features = ["mlt"]
 
 [[example]]
 name = "spike"

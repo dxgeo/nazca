@@ -100,12 +100,17 @@ impl Counties {
     pub fn prepare(&self, grid: &TileGrid, id: TileId) -> Mesh {
         let mut builder = MeshBuilder::for_tile(grid, id).unwrap();
         let reach = grid.bounds(id).unwrap().expand(Detail::default().guard_px * grid.resolution(id.z).unwrap());
+        self.prepare_into(&mut builder, reach);
+        builder.finish()
+    }
+
+    /// Feeds `builder` the counties whose stored bounds reach `reach`.
+    pub fn prepare_into(&self, builder: &mut MeshBuilder, reach: Rect) {
         for (i, c) in self.counties.iter().enumerate().filter(|(_, c)| c.bounds.intersects(&reach)) {
             builder.set_class(c.class);
             builder.set_feature(i as u32);
-            wkb::read(&c.wkb, &mut ToWebMercator(&mut builder)).unwrap();
+            wkb::read(&c.wkb, &mut ToWebMercator(&mut *builder)).unwrap();
         }
-        builder.finish()
     }
 }
 

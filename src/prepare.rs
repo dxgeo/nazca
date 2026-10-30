@@ -66,6 +66,13 @@ pub struct Mesh {
     pub outlines: Vec<u32>,
     /// Point features, one vertex index each.
     pub points: Vec<u32>,
+    /// Each polygon ring's vertices, as a `[start, end)` range: a ring's
+    /// vertices are stored consecutively. What a backend that fills paths
+    /// rather than triangles (SVG) draws.
+    pub rings: Vec<[u32; 2]>,
+    /// Each polygon's rings, as a `[start, end)` range into `rings`; the
+    /// first is the exterior.
+    pub polygons: Vec<[u32; 2]>,
     /// One per vertex: the feature it belongs to, as
     /// [`MeshBuilder::set_feature`] set it. What picking returns.
     pub ids: Vec<u32>,
@@ -80,6 +87,7 @@ impl Mesh {
     /// size to give [`crate::TileCache::insert`].
     pub fn byte_size(&self) -> usize {
         4 * (self.vertices.len() + self.fills.len() + self.outlines.len() + self.points.len() + self.ids.len())
+            + 8 * (self.rings.len() + self.polygons.len())
     }
 }
 
@@ -127,6 +135,8 @@ impl MeshBuilder {
                 fills: Vec::new(),
                 outlines: Vec::new(),
                 points: Vec::new(),
+                rings: Vec::new(),
+                polygons: Vec::new(),
                 ids: Vec::new(),
             },
             class: 0.0,
@@ -142,6 +152,19 @@ impl MeshBuilder {
             earcut: Earcut::new(),
             tris: Vec::new(),
         }
+    }
+
+    /// A builder for everything `camera` shows, at its own resolution: one
+    /// frame around the view, as a layout prepares its single view
+    /// (`../plans/rendering.org` § THE PIPELINE). The camera's pixels set the
+    /// detail, so a print-resolution camera keeps more vertices than a
+    /// screen one of the same map.
+    pub fn for_view(camera: &crate::camera::Camera) -> MeshBuilder {
+        let b = camera.visible_bounds();
+        let half_span = (b.max[0] - b.min[0]).max(b.max[1] - b.min[1]) / 2.0;
+        let frame = TileFrame { center: b.center(), half_span: half_span.max(f64::MIN_POSITIVE) };
+        let detail = Detail { tile_px: (2.0 * half_span / camera.units_per_px).max(1.0), ..Detail::default() };
+        MeshBuilder::new(frame, detail)
     }
 
     /// A builder for tile `id` of `grid`, at the grid's tile size and the
@@ -414,6 +437,11 @@ impl Sink for MeshBuilder {
             return;
         }
         let base = self.mesh.vertex_count() as u32;
+        let first_ring = self.mesh.rings.len() as u32;
+        for r in &self.rings {
+            self.mesh.rings.push([base + r.start as u32, base + r.end as u32]);
+        }
+        self.mesh.polygons.push([first_ring, self.mesh.rings.len() as u32]);
         self.tris.clear();
         self.earcut.triangulate(&self.pts, &self.rings, &mut self.tris);
         self.mesh.fills.extend(self.tris.iter().map(|&i| base + i));
@@ -477,6 +505,18 @@ mod tests {
         assert_eq!(m.vertex_count(), 4);
         assert_eq!(fill_area(&m), 400.0);
         assert_eq!(m.outlines.len(), 8);
+    }
+
+    #[test]
+    fn polygons_record_their_rings() {
+        let mut b = builder();
+        let square = |c: f64, r: f64| [[c - r, c - r], [c + r, c - r], [c + r, c + r], [c - r, c + r]];
+        polygon(&mut b, &[&square(0.0, 20.0), &square(0.0, 5.0)]);
+        polygon(&mut b, &[&square(50.0, 5.0)]);
+        let m = b.finish();
+        assert_eq!(m.polygons, [[0, 2], [2, 3]]);
+        assert_eq!(m.rings, [[0, 4], [4, 8], [8, 12]]);
+        assert_eq!(m.vertex_count(), 12);
     }
 
     #[test]

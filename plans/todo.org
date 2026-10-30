@@ -8,6 +8,8 @@ plan/section for detail; check it off and remove it once the item ships or is
 shelved.
 
 - [ ] *Build the v1 slice* -- [[file:rendering.org][rendering.org]] § V1 SLICE.
+  Steps 1--5 and nazca's side of step 6 are built; next is DuckMap's side of
+  step 6 (its wasm consumer, the WKB tile route, the new page).
 
 /The reprojection items that used to be here (R1--R8, the =proj-db= SQLite
 question, transform-bounds and its failure modes, the CLI) moved to

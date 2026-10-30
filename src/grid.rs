@@ -188,6 +188,29 @@ impl TileGrid {
         (0..=self.max_zoom()).find(|&z| self.resolution(z).unwrap() <= target).unwrap_or(self.max_zoom())
     }
 
+    /// The continuous level at `units_per_px`: a whole number at each
+    /// level's own resolution, and between two levels the fraction of the
+    /// way from one to the next in log scale. Past either end it carries on
+    /// at the end level's rate. On the XYZ Web Mercator grid of 512-pixel
+    /// tiles this is MapLibre's zoom, so zoom-dependent styles written for
+    /// MapLibre read it unchanged ([`crate::style::interpolate`]).
+    pub fn fractional_level(&self, units_per_px: f64) -> f64 {
+        let res = |z: usize| self.levels[z].span / self.tile_px as f64;
+        let last = self.levels.len() - 1;
+        // The rate of the nearest pair of levels, or of a quadtree's when
+        // there is only one level.
+        let rate = |z: usize| if last == 0 { 2f64.ln() } else { (res(z) / res(z + 1)).ln() };
+        if units_per_px >= res(0) || last == 0 {
+            return (res(0) / units_per_px).ln() / rate(0);
+        }
+        for z in 0..last {
+            if units_per_px >= res(z + 1) {
+                return z as f64 + (res(z) / units_per_px).ln() / rate(z);
+            }
+        }
+        last as f64 + (res(last) / units_per_px).ln() / rate(last - 1)
+    }
+
     /// A tile's extent in map units, or `None` if no such tile exists.
     pub fn bounds(&self, id: TileId) -> Option<Rect> {
         let level = self.level(id.z)?;
@@ -424,6 +447,22 @@ mod tests {
         assert_eq!(g.level_for_resolution(r0 / 3.0), 2);
         assert_eq!(g.level_for_resolution(r0 * 10.0), 0);
         assert_eq!(g.level_for_resolution(1e-6), 22);
+    }
+
+    #[test]
+    fn fractional_levels_are_maplibre_zoom_on_web_mercator() {
+        let g = TileGrid::web_mercator(512, 22).unwrap();
+        for z in [0.0, 3.0, 7.5, 12.25, 22.0, 24.0, -1.5] {
+            let upp = g.resolution(0).unwrap() / 2f64.powf(z);
+            assert!((g.fractional_level(upp) - z).abs() < 1e-9, "{z}");
+        }
+        // An irregular grid: whole at its levels, between them in log scale.
+        let levels = vec![Level { span: 1000.0, cols: 1, rows: 1 }, Level { span: 100.0, cols: 10, rows: 10 }];
+        let g = TileGrid::new([0.0, 0.0], 100, levels).unwrap();
+        assert!((g.fractional_level(10.0) - 0.0).abs() < 1e-12);
+        assert!((g.fractional_level(1.0) - 1.0).abs() < 1e-12);
+        assert!((g.fractional_level(10f64.sqrt()) - 0.5).abs() < 1e-12);
+        assert!((g.fractional_level(0.1) - 2.0).abs() < 1e-12);
     }
 
     #[test]

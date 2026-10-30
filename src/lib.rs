@@ -8,7 +8,9 @@
 //! and drawn in; a [`Camera`] says which part of the plane is on screen, a
 //! [`TileSelector`] which tiles that needs, and a [`TileCache`] keeps the
 //! prepared ones between frames. A [`Palette`] styles them by class, and a
-//! [`Colormap`] colours [`raster`] bands.
+//! [`Colormap`] colours [`raster`] bands. The `gl` backend draws them
+//! interactively and [`svg`] writes layouts; the `mvt` and `mlt` features
+//! decode basemap vector tiles into a [`Sink`].
 //!
 //! Everything but the `gl` backend is free of `unsafe`. `glow`'s calls are
 //! all `unsafe fn`, so `gl` alone is allowed it; `forbid` cannot be lifted for
@@ -21,11 +23,16 @@ pub mod earcut;
 #[cfg(feature = "gl")]
 pub mod gl;
 pub mod grid;
+#[cfg(feature = "mlt")]
+pub mod mlt;
+#[cfg(feature = "mvt")]
+pub mod mvt;
 pub mod prepare;
 pub mod raster;
 pub mod select;
 pub mod sink;
 pub mod style;
+pub mod svg;
 pub mod wkb;
 
 pub use cache::{Plan, TileCache, TileKey};

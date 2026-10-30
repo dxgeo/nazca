@@ -61,8 +61,9 @@ External crates are allowed; sibling crates are not (that would be an edge,
   draw-command buffer and the SVG backend.
 - *Heavier parts sit behind features*: =gl= (=glow=), =raster= (=tiny-skia=),
   =text= (a small glyph rasterizer such as =ab_glyph= or =fontdue=).
-- *=mvt= is a feature too, with no dependency*: a small hand-written decoder
-  for third-party MVT basemaps (plans/rendering.org § MAPLIBRE PARITY).
+- *=mvt= and =mlt= are features too, with no dependency*: small hand-written
+  decoders for third-party basemaps in either vector tile encoding
+  (plans/rendering.org § MAPLIBRE PARITY).
 - *Pure Rust only, no C build scripts.* DuckMap found =proj4rs-geodesic='s
   =cc= build step breaks =wasm32-unknown-unknown= (=DuckMap/HANDOFF.org=
   item 4). Any dependency must build for that target unmodified.
@@ -145,6 +146,8 @@ earcut), the tile cache, the camera with its tile-selection trait, and the
 =glow= backend (palette-styled fills, shader-expanded lines and points,
 colormapped and mesh-warped rasters, ID-buffer picking) -- and the spike
 drawing and picking counties tile by tile through them, natively and in a
-browser (plans/rendering.org § V1 SLICE). See
+browser. Of step 6, nazca's side: the MVT and MLT decoders, zoom-dependent
+styles and the SVG backend, with a layout example (plans/rendering.org § V1
+SLICE). See
 [[file:plans/rendering.org][plans/rendering.org]] and
 [[file:plans/todo.org][plans/todo.org]].
