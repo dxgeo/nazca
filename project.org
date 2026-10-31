@@ -12,16 +12,16 @@ important: one pipeline serves both, differing only in whether prepared
 geometry is cached and redrawn every frame or drawn once at print resolution.
 
 It is meant to be *lightweight, fast and memory-efficient*, to run the same
-natively and in WebAssembly, and to replace MapLibre GL as DuckMap's map
-client. The design is in [[file:plans/rendering.org][plans/rendering.org]].
+natively and in WebAssembly, and to draw what a MapLibre GL map draws. The
+design is in [[file:plans/rendering.org][plans/rendering.org]].
 
 ** SCOPE -- decided 2026-10-29 (user decisions)
 - *Interactive mapping and layouts are equally important.* Neither is a
   by-product of the other.
-- *Nazca replaces MapLibre in DuckMap.* DuckMap's Views mode
-  (=DuckMap/ingestion/web/interactive_map.html=) runs on nazca instead of
-  MapLibre GL. The feature set that page uses today is nazca's first parity
-  target (plans/rendering.org § MAPLIBRE PARITY).
+- *MapLibre GL parity is the first target.* Fill, line and raster layers
+  over vector, PMTiles and XYZ raster tiles, their paint properties and zoom
+  ranges, picking, rotation and fitting to bounds (plans/rendering.org §
+  MAPLIBRE PARITY).
 - *Native is in scope*, not only the browser.
 - *Raster goes through the same tile cache as vector.*
 - *Globe view is wanted, after MapLibre parity.* v1 is designed so it is not
@@ -50,8 +50,8 @@ client. The design is in [[file:plans/rendering.org][plans/rendering.org]].
 - *Feature attributes.* Nazca holds geometry and a feature id, never
   properties. A click returns =(layer, feature_id)=; the embedder looks up
   the rest.
-- *Page layout.* Typst page composition stays in DuckMap. Nazca draws what
-  goes inside a map frame.
+- *Page layout.* Composing a page (Typst or otherwise) is the embedder's.
+  Nazca draws what goes inside a map frame.
 
 ** DEPENDENCY POLICY -- decided 2026-10-29 (user decision)
 External crates are allowed; sibling crates are not (that would be an edge,
@@ -64,9 +64,9 @@ External crates are allowed; sibling crates are not (that would be an edge,
 - *=mvt= and =mlt= are features too, with no dependency*: small hand-written
   decoders for third-party basemaps in either vector tile encoding
   (plans/rendering.org § MAPLIBRE PARITY).
-- *Pure Rust only, no C build scripts.* DuckMap found =proj4rs-geodesic='s
-  =cc= build step breaks =wasm32-unknown-unknown= (=DuckMap/HANDOFF.org=
-  item 4). Any dependency must build for that target unmodified.
+- *Pure Rust only, no C build scripts.* A =cc= build step breaks
+  =wasm32-unknown-unknown= (=proj4rs-geodesic='s does). Any dependency must
+  build for that target unmodified.
 - *=unsafe= only in the =gl= backend* (since 2026-10-29). Every =glow= call
   is an =unsafe fn=, and =forbid(unsafe_code)= cannot be lifted for one
   module, so the crate went from =forbid= to =deny= with =gl= alone allowed,
@@ -121,9 +121,9 @@ plans moved too, with their content intact:
 
 So did this file's =CHARTER= section, the falsifiable test for which math
 belongs where. It is now =geoscribe/project.org= § CHARTER. The old version of
-this file is not in any git history (=nazca/= is untracked); the charter text
-survives there, and the reprojection roadmap survives in geoscribe's
-=plans/todo.org=.
+this file is not in any git history (=nazca/= was untracked until
+2026-10-29); the charter text survives there, and the reprojection roadmap
+survives in geoscribe's =plans/todo.org=.
 
 On 2026-10-29 the rendering scope above was written down.
 
@@ -136,8 +136,7 @@ caller that links them or through a pipe between CLIs, never through a
 such an edge.
 
 A browser binding (=wasm-bindgen=) belongs in a separate consumer crate, not
-as a =cdylib= inside nazca ([[file:../wasm-plan.org][../wasm-plan.org]]). In
-practice that consumer is DuckMap.
+as a =cdylib= inside nazca ([[file:../wasm-plan.org][../wasm-plan.org]]).
 
 ** STATUS
 Scope written 2026-10-29. Implemented: v1 slice steps 1--5 -- the =Sink=
@@ -147,8 +146,6 @@ earcut), the tile cache, the camera with its tile-selection trait, and the
 colormapped and mesh-warped rasters, ID-buffer picking) -- and the spike
 drawing and picking counties tile by tile through them, natively and in a
 browser. Step 6: the MVT and MLT decoders, zoom-dependent styles and the SVG
-backend, with a layout example; and in DuckMap, a WKB tile route, the
-=duckmap-nazca= wasm consumer and =nazca_map.html=, DuckMap's Views mode on
-nazca beside the MapLibre page (plans/rendering.org § V1 SLICE). See
+backend, with a layout example (plans/rendering.org § V1 SLICE). See
 [[file:plans/rendering.org][plans/rendering.org]] and
 [[file:plans/todo.org][plans/todo.org]].

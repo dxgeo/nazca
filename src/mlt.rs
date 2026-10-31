@@ -616,6 +616,7 @@ fn compact(mut v: u32) -> u32 {
 // exceptions patched from per-width arrays; the values past the last whole
 // block in a variable-byte tail. As `encodings.md` § FastPFOR and the
 // reference TypeScript decoder (`ts/src/decoding/fastPforDecoder.ts`) define.
+// The decoder follows that reference, under its MIT licence (`../NOTICE`).
 
 const BLOCK: usize = 256;
 const PAGE: usize = 65536;

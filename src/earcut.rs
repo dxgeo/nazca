@@ -10,7 +10,7 @@
 //! nothing per polygon once warmed up.
 //!
 //! The functions keep earcut's names and orientation conventions, so this
-//! file can be read against the original: [`area`] is *negative* for a
+//! file can be read against the original: `area` is *negative* for a
 //! counter-clockwise turn, and the outer ring is linked counter-clockwise
 //! (Y up), holes clockwise.
 //!

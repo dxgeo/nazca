@@ -7,10 +7,8 @@ Live list of what's open right now. Each entry is just a link to its real
 plan/section for detail; check it off and remove it once the item ships or is
 shelved.
 
-- [ ] *Confirm MapLibre parity and retire the MapLibre page* --
-  [[file:rendering.org][rendering.org]] § V1 SLICE, step 6. The v1 slice is
-  built; DuckMap's =nazca_map.html= runs beside =interactive_map.html= for
-  comparison.
+- [ ] *Confirm MapLibre parity* -- [[file:rendering.org][rendering.org]]
+  § V1 SLICE, step 6. The v1 slice is built.
 
 /The reprojection items that used to be here (R1--R8, the =proj-db= SQLite
 question, transform-bounds and its failure modes, the CLI) moved to
