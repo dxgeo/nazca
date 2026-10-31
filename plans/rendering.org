@@ -381,10 +381,23 @@ Not a backend but also feature-gated: =mvt= (decoder, no dependency;
   would be a second copy of the same data.
 
 /The SVG backend, implemented 2026-10-30 (=src/svg.rs=):/ =SvgWriter= in the
-default build. Per mesh: one =<path>= a polygon (=fill-rule="evenodd"= for
-its holes), then the outline segments chained back into polylines in one
-=<path>= per class -- exactly the segments the GPU strokes, so edges that
-clipping made are not stroked here either -- then a =<circle>= per point.
+default build. Fills come from the polygon rings, lines from the outline
+segments chained back into polylines -- exactly the segments the GPU
+strokes, so edges that clipping made are not stroked here either -- and a
+=<circle>= per point.
+/Changed 2026-10-30: one =<path>= per class for a whole layer./ Each layer's
+fills, and its lines, are gathered over every =draw= into one path per
+class, written when the layer ends; points follow. It was a path per
+polygon, and a polygon split along tile edges then showed the background
+through every split, because a viewer antialiases each path's edges on its
+own. Rendered with =rsvg-convert=, an edge at x = 50.5 between two halves of
+one 0.9-opaque black fill came out 77 against 25 elsewhere (255 white), and
+63 against 0 for an opaque one; as one path, 25 throughout. Fills are
+=nonzero=, with each exterior wound clockwise on screen and holes the other
+way, so features in one path neither cancel nor blend twice. The cost: two
+features of one class that overlap fill as their union, where the GPU
+blends a translucent fill twice, and a layer's fills stack by class rather
+than in feature order.
 Styles are CSS classes written once, named per layer so two layers' palettes
 cannot collide; coordinates are written to a hundredth of a pixel. A layout
 prepares its one view with =MeshBuilder::for_view(&camera)=: a frame around
@@ -563,11 +576,55 @@ first. The Massachusetts counties go WKB -> =Sink= -> =MeshBuilder= ->
        basemaps (PMTiles MVT, PMTiles MLT, hosted raster), the land-cover
        overlay, popups, rotation, the SVG export. The two pages draw the same
        map.
-     - /Known limits/: in the SVG, neighbouring tiles' translucent fills
-       abut exactly, and some viewers antialias each edge, so a faint seam
-       can show along tile edges (the stencil prevents this on screen).
-       Fetches no longer needed are dropped while queued but not cancelled
-       once started.
+     - /Found in use, 2026-10-30, and fixed in DuckMap's data, not in
+       nazca/:
+       - *County outlines gained no detail when zoomed in.* The route
+         stops simplifying as tiles shrink, but the counties were the
+         Census 1:20M cartographic boundary, so the detail was never there.
+         They are now the 1:500k boundary (3,222 counties, 1.03M vertices),
+         and the PMTiles basemap was rebuilt from them.
+       - *The basemap still showed its own edges beside the counties'.* It
+         stopped at z6, so further in it was a z6 tile stretched up to 64
+         times, its quantized edges stepping off the full-detail counties
+         drawn above it (the 0.9-opaque fill lets it show through). It now
+         goes to z12, where the tile route stops simplifying: 312,385
+         tiles, 57 MB as MVT and 60 MB as MLT, built in under a minute.
+       - *Every tile scanned the whole table.* DuckLake keeps no stats for a
+         GEOMETRY, so =ST_Intersects= pruned no files: a z10 roads tile at
+         Boston read all 52 roads files (431 MB) to keep 976 rows. The
+         counties, roads and cities tables now store each geometry's bbox
+         as =xmin=, =ymin=, =xmax=, =ymax= columns, and the route
+         range-tests them before =ST_Intersects=, so DuckLake skips files by
+         their min/max stats. That needs files that each cover a small
+         area: counties and cities are partitioned by =state_fips= and
+         Hilbert-sorted within each state; roads are inserted a state at a
+         time, which gives the same layout. The Boston box now reads 1 file
+         in each table instead of 52 (56 for cities). A z10 counties tile
+         fell from 0.87 s to 0.05 s, about the route's fixed cost per
+         request; low-zoom roads tiles (0.6--1.2 s at z4--z7) are now
+         dominated by simplifying and sending 1--2 MB of lines.
+       - The views' =source_sql= now selects =*=, so a scoped view's
+         subquery carries the bbox columns the range test reads.
+     - /Known limits/:
+       - /Fixed 2026-10-30, in nazca's SVG backend/: seams along tile edges
+         in the SVG, where neighbouring tiles' fills abutted as separate
+         paths. Any antialiasing viewer showed them, opaque fills too, not
+         only translucent ones and not only some viewers (§ BACKENDS).
+       - /Changed 2026-10-30:/ fetches no longer needed are dropped while
+         queued and, since then, aborted once started, freeing their slot;
+         on a fast zoom from z5 to z10 that aborted 12 and the view was
+         complete 4.5 s after the jump. The server drops an aborted request
+         still waiting for a query slot, so its query never runs (one slot
+         per core, measured). One already running runs to the end: a Quack
+         query cannot be cancelled on DuckDB 1.5. 2.0's =quack_cancel= can,
+         and DuckMap moves to 2.0 once DuckDB-Wasm has a 2.0 build
+         (=DuckMap/plans/duckdb-2.0.org=).
+       /Tried and reverted the same day/: fetching an ancestor two levels
+       up as a stand-in, first in the queue, and capping stand-ins at two
+       levels. The cap blanked the screen after a fast zoom, which other
+       maps do not do, and the extra tiles (a z8 roads tile is as slow to
+       build as the z10 tiles it stands in for) made the view slower to
+       complete.
 
 *So v1 does not foreclose the globe* (§ GLOBE), it must also have:
 - a camera built on a 4x4 matrix (§ CAMERA);
