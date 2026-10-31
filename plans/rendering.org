@@ -110,6 +110,12 @@ its bounds touch. The globe selector will implement the same trait.
   by default, as MVT's 4096 extent is), then repeats and exactly collinear
   middle points are dropped. On an integer grid both tests are exact, so
   neighbours agree point for point.
+  /Changed 2026-10-30: point features are not snapped./ A tile standing in
+  for one several levels down is magnified by the difference, and so is
+  its snapping: a z5 tile shown at z10 put dots up to 4 CSS pixels off,
+  and they jumped when the real tile arrived (found in DuckMap, zooming
+  fast). A lone point has no border to share and nothing to decimate, so it
+  keeps its exact tile-local position.
 - *Clip* to the tile plus a guard band, so off-tile coordinates never reach
   the rasterizer and line joins at tile edges stay clean.
 - *Tessellate* polygons with earcut (hand-rolled, about 500 lines, or

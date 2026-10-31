@@ -10,7 +10,8 @@
 //!    whichever way each one runs. That is why this snaps rather than
 //!    "dropping points that share a pixel" (`../plans/rendering.org` §
 //!    PREPARE): dropping depends on direction and would open slivers between
-//!    neighbours.
+//!    neighbours. Point features are the exception and keep their exact
+//!    position (`MeshBuilder::point`).
 //! 2. *decimated*: a point snapped onto its predecessor, or exactly in line
 //!    with the two before it, adds nothing at this resolution and is dropped.
 //!    On an integer grid both tests are exact, so neighbours still agree.
@@ -339,8 +340,13 @@ fn clip_segment(a: [f64; 2], b: [f64; 2], c: f64) -> Option<([f64; 2], [f64; 2])
 }
 
 impl Sink for MeshBuilder {
+    /// A point feature is kept where it is, not snapped: snapping serves
+    /// shared borders and decimation, neither of which a lone point has, and
+    /// a tile drawn as a stand-in several levels up would magnify the
+    /// rounding into a visible jump when the real tile replaces it.
     fn point(&mut self, xy: [f64; 2]) {
-        let g = self.snap(xy);
+        let [x, y] = self.mesh.frame.to_local_f64(xy);
+        let g = [x * self.half_cells, y * self.half_cells];
         if self.inside(g) {
             let i = self.push_vertex(g);
             self.mesh.points.push(i);
@@ -664,5 +670,20 @@ mod tests {
         b.point([200.0, 0.0]);
         let m = b.finish();
         assert_eq!(m.points.len(), 2);
+    }
+
+    #[test]
+    fn points_are_not_snapped() {
+        // A grid step is one unit here; a line's vertex rounds onto it, a
+        // point feature stays put.
+        let mut b = builder();
+        b.point([12.3, -45.6]);
+        b.begin_line();
+        b.points(&[[12.3, -45.6], [30.0, 0.0]]);
+        b.end_line();
+        let m = b.finish();
+        let at = |i: usize| [m.vertices[3 * i], m.vertices[3 * i + 1]];
+        assert_eq!(at(m.points[0] as usize), [0.123, -0.456]);
+        assert_eq!(at(1), [0.12, -0.46]);
     }
 }
