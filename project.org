@@ -31,7 +31,11 @@ design is in [[file:plans/rendering.org][plans/rendering.org]].
 - *Works best with =geosetta=, works with any I/O library.* Because there
   are no dependency edges (§ ARCHITECTURE), "best with geosetta" cannot mean
   a geosetta feature. It means geosetta's outputs (WKB, stored bboxes,
-  Hilbert-sorted FlatGeobuf) are the inputs nazca handles best.
+  Hilbert-sorted FlatGeobuf) are the inputs nazca handles best -- and,
+  for a caller linking both, geosetta's IR read in place: an adapter walks
+  =GeometryRef::shape= into a =Sink=, a flat 2D run handed to =points= as
+  the slice it is held in (=geosetta/plans/columnar.org= D-C17, tested in
+  =geosetta/tests/nazca_sink.rs=).
 - *Dependencies are allowed.* Unlike its siblings, nazca does not have to be
   standard-library only, because some of rendering (GPU access, rasterization,
   glyphs) would be prohibitive to hand-write. See § DEPENDENCY POLICY.
