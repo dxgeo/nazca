@@ -12,8 +12,8 @@ const TSV: &str = include_str!("../../tests/fixtures/counties_sample.tsv");
 /// Projects longitude/latitude to Web Mercator metres on the way into
 /// another sink.
 ///
-/// This stands in for `geoscribe`: projection is CRS math, which nazca does
-/// not do (`project.org` § CHARTER), so a caller does it inside its sink --
+/// This stands in for `geoscribe`, which plans reprojection as of 0.5.1:
+/// projection is CRS math, which nazca does not do (`project.org` § CHARTER), so a caller does it inside its sink --
 /// the seam `plans/rendering.org` § INPUT describes. Spherical Web Mercator
 /// is simple enough to write here in two lines.
 struct ToWebMercator<'a, S: Sink>(&'a mut S);
@@ -166,8 +166,8 @@ const SOUTH: f64 = 41.2;
 ///
 /// The raster is on a longitude/latitude grid, which Web Mercator stretches
 /// north-south, so it is warped: a 9 x 9 control grid of its positions,
-/// projected the way a caller would through `geoscribe`
-/// (`plans/rendering.org` § RASTER, mesh warp).
+/// projected the way a caller would through `geoscribe` once it can (planned
+/// as of 0.5.1; `plans/rendering.org` § RASTER, mesh warp).
 pub fn overlay(kind: Overlay) -> Option<(Vec<u8>, Vec<f32>, RasterMesh, Colormap)> {
     let km = |lon: f64, lat: f64| {
         let (dx, dy) = ((lon + 71.06) * 111.32 * 42.36f64.to_radians().cos(), (lat - 42.36) * 110.57);

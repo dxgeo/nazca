@@ -20,9 +20,10 @@ mvt = []
 mlt = []
 
 [dependencies]
-# Nazca does not depend on `geosetta` or `geoscribe`, and they do not depend on
-# it: the three crates are peers that compose by piping text between their
-# CLIs, or by a caller that links several of them (see ../../architecture.org).
+# Nazca does not depend on `geosetta` or `geoscribe`, and as of geosetta 0.27.0
+# and geoscribe 0.5.1 they do not depend on it: the three crates are peers that
+# compose by piping text between their CLIs, or by a caller that links several
+# of them (see ../../architecture.org).
 glow = { version = "0.18.0", optional = true }
 
 # Reads the MLT conformance fixtures' expected GeoJSON in tests.

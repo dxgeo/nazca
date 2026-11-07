@@ -7,12 +7,15 @@
 ** STATUS -- v1 slice implemented (steps 1--6)
 Written 2026-10-29 from a brainstorming session; § V1 SLICE records what is
 built. The scope it serves
-(interactive and layouts equally, replacing MapLibre in DuckMap, native in
-scope, raster through the tile cache, a globe after parity) is user-decided
+(interactive and layouts equally, native in
+scope, raster through the tile cache, a globe after v1) is user-decided
 and recorded in [[file:../project.org][../project.org]] § SCOPE. So is the
 boundary with =geoscribe= ([[file:../project.org][../project.org]] § CHARTER). Everything in this file is a
 *proposal* unless a section says otherwise; § OPEN QUESTIONS lists what still
 needs a decision.
+
+Where this file has a caller use =geoscribe= to project, warp, densify or
+simplify, that is the plan: geoscribe 0.5.1 implements none of them.
 
 ** THE PIPELINE
 Two stages, so an interactive frame never repeats expensive work:
@@ -35,7 +38,7 @@ Two stages, so an interactive frame never repeats expensive work:
 Two entry points, both borrowing rather than owning:
 
 - *WKB bytes (=&[u8]=).* An external spec, so it is the geometry analogue of
-  =architecture.org='s Rule 1. =geosetta= writes it (=geometry/wkb.rs=), DuckDB
+  =architecture.org='s Rule 1. =geosetta= 0.27.0 writes it (=geometry/wkb.rs=), DuckDB
   emits it (=ST_AsWKB=), and GeoParquet and GeoPackage store it. Nazca reads it
   in place without building a geometry tree (=src/wkb.rs=, implemented
   2026-10-29).
@@ -45,9 +48,9 @@ Two entry points, both borrowing rather than owning:
   (§ PREPARE)./
 - *The =Sink= trait* (=src/sink.rs=: =point=, =points(&[[f64; 2]])=, and
   begin/end events for lines, polygons and rings) for every other source: =geo-types=, GeoArrow buffers, or
-  =geosetta='s =for_each_position_run= driven by a caller in a few lines. Same
-  pattern as the retired =CrsRegistry= trait: name the capability, not the
-  provider.
+  =geosetta='s =GeometryRef::shape= walked by a caller's adapter (newer than
+  0.27.0: true of its main at =5101342=, unreleased). It names the capability,
+  not the provider.
 
 Coordinates arrive in the map's CRS, or as geocentric XYZ for a globe
 (§ GLOBE). Nazca applies camera transforms only.
@@ -60,8 +63,7 @@ fused pass, not two passes and an intermediate buffer.
 ** TILE GRIDS
 A tile grid is an origin plus a resolution per zoom level, in map units.
 XYZ Web Mercator is one instance; any projected CRS can define its own. This
-lets interactive views use a per-view CRS the way DuckMap's layout panes
-already do, which MapLibre cannot.
+lets interactive views use a per-view CRS, which MapLibre cannot.
 
 - Prepared buffers are stored in *tile-local f32 coordinates*, which avoids
   the precision jitter of f32 world coordinates at street level. The camera
@@ -113,7 +115,7 @@ its bounds touch. The globe selector will implement the same trait.
   /Changed 2026-10-30: point features are not snapped./ A tile standing in
   for one several levels down is magnified by the difference, and so is
   its snapping: a z5 tile shown at z10 put dots up to 4 CSS pixels off,
-  and they jumped when the real tile arrived (found in DuckMap, zooming
+  and they jumped when the real tile arrived (found zooming
   fast). A lone point has no border to share and nothing to decimate, so it
   keeps its exact tile-local position.
 - *Clip* to the tile plus a guard band, so off-tile coordinates never reach
@@ -138,8 +140,8 @@ every tile matches their exact area -- within 3e-2 square degrees at worst,
 four orders of magnitude inside the snapping bound -- and no vertex leaves its
 tile. All 3,222 into the 2,560 tiles of a 512-pixel level 7 (degree grid)
 takes 13 ms in release. That data is already a generalised 1:20M boundary
-set, so decimation barely shows on it (79% of points kept at level 3); the
-28-million-vertex DuckMap roads layer is the honest benchmark for it.
+set, so decimation barely shows on it (79% of points kept at level 3); a
+28-million-vertex roads layer is the honest benchmark for it.
 Fine levels emit more vertices than they read (148% at level 9): clipping
 adds points where borders cross tile edges, and each tile keeps its own.
 
@@ -186,7 +188,7 @@ finish.
 
 ** RASTER -- through the same cache (user decision, 2026-10-29)
 - Store the *raw band*, not colored RGBA: an =R8= texture for a categorical
-  band like DuckMap's =lcmap_lcpri=, =R32F= for continuous data. The colormap
+  band like land cover, =R32F= for continuous data. The colormap
   is a lookup texture applied in the shader.
 - That is 4x less memory than RGBA for u8 bands, and changing the colormap is
   instant, through the same mechanism as vector restyling.
@@ -221,10 +223,9 @@ its rings come out as circles.
 
 ** STYLING -- decided 2026-10-29 (user decision)
 - Plain Rust structs plus a per-feature callback that returns a style class.
-  No nazca expression language: DuckMap's SQL already plays that role.
+  No nazca expression language: the embedder's own logic plays that role.
 - Colors, widths and opacity live in a small *palette texture* indexed by
-  style class. Restyling (a =layer_styles= row edited in SQL, DuckMap
-  APP_SPEC step 6) rewrites the palette only; no tile is re-prepared.
+  style class. Restyling rewrites the palette only; no tile is re-prepared.
 - Visibility and min/max zoom are per layer and checked at draw time.
 - A MapLibre style-spec subset could come later as an optional adapter (an
   external spec, so Rule 1 friendly). Not in v1.
@@ -237,7 +238,7 @@ read by =texelFetch=; =update_palette= restyles in one upload. Visibility
 and min/max zoom are the embedder's for now: it chooses which layers to
 draw.
 
-/Zoom-dependent values, 2026-10-30:/ DuckMap's =circle-radius= follows
+/Zoom-dependent values, 2026-10-30:/ a =circle-radius= can follow
 =["interpolate", ["linear"], ["zoom"], 3, 1, 10, 5]=. =style::interpolate(stops,
 base, zoom)= evaluates MapLibre's linear and exponential curves, and
 =TileGrid::fractional_level(units_per_px)= gives the zoom: on the 512-pixel
@@ -248,8 +249,7 @@ growing an expression language.
 
 ** HIT-TESTING
 - *ID-buffer picking*: render feature ids to an offscreen buffer and read back
-  one pixel. Returns =(layer, feature_id)=; the embedder fetches attributes
-  (DuckMap: one Quack lookup for its popup).
+  one pixel. Returns =(layer, feature_id)=; the embedder fetches attributes.
 - No CPU-side geometry is kept for picking, which is what lets the cache drop
   CPU copies after upload.
 - Reading pixels back stalls WebGL, so hover picking needs throttling. Click
@@ -289,7 +289,7 @@ a hundredth of a pixel at 0.1 m per pixel at Web Mercator's far east edge.
 The =gl= backend's shader takes it as =uniform mat4=. Easing for animated
 moves is not built yet.
 
-** GLOBE -- after MapLibre parity (user decision, 2026-10-29)
+** GLOBE -- after v1 (user decision, 2026-10-29)
 MapLibre's globe projects Web Mercator to a sphere in the vertex shader. That
 is CRS math, which nazca does not do (§ CHARTER in =../project.org=). The
 charter-clean way:
@@ -324,8 +324,8 @@ What the charter does cost:
 - *No projection in shaders.* Covered for the globe by § GLOBE and for
   warping by § RASTER's mesh warp.
 - *Projection runs before decimation*, so every vertex is projected, including
-  those decimation then drops. Mitigation: project upstream once (DuckMap's
-  tile route can =ST_Transform= and simplify in DuckDB), or have the caller
+  those decimation then drops. Mitigation: project upstream once (a tile
+  server can =ST_Transform= and simplify in its database), or have the caller
   pre-simplify with =geoscribe= per zoom level. Either way it is paid once per
   tile at prepare, never per frame: the camera never re-projects.
 - *Attribute lookups take a round trip* (from nazca not holding attributes,
@@ -342,7 +342,7 @@ What the charter does cost:
 | =tiny-skia= | =raster= | PNG export, server-side raster tiles |
 
 Not a backend but also feature-gated: =mvt= (decoder, no dependency;
-§ MAPLIBRE PARITY) and =text= (glyphs; § LABELS).
+§ V1 FEATURES) and =text= (glyphs; § LABELS).
 
 - =glow= over =wgpu=: a thin, pure-Rust GL binding that covers WebGL2 and
   native GL and adds tens of KB to a wasm build rather than megabytes. WebGPU
@@ -370,8 +370,7 @@ Not a backend but also feature-gated: =mvt= (decoder, no dependency;
   asked). Verified with translucent fills over 16 tiles: no tile edge shows.
 - *Known limits*: a translucent line blends twice where segments' round ends
   overlap (darker dots at vertices), and a border two polygons share is
-  outlined by both. Neither shows with opaque lines; MapLibre parity needs
-  no =line-opacity=.
+  outlined by both. Neither shows with opaque lines.
 - /Changed 2026-10-30, with the SVG backend: no separate draw-command
   buffer./ The prepared =Mesh= is already flat =f32= / =u32= buffers, and it
   is what both backends replay. The GPU takes its triangles and outline
@@ -408,45 +407,35 @@ an 8 x 6 inch page at 150 dpi: the MLT basemap tile under the WKB counties,
 north up or turned, 37 KB of SVG; rendered with =rsvg-convert= the two
 sources register exactly.
 
-** LABELS -- after MapLibre parity (user decision, 2026-10-29)
+** LABELS -- after v1 (user decision, 2026-10-29)
 Interactive labels must stay put across pan and zoom without flicker, which
-is much harder than placing them once for a layout. DuckMap's MapLibre page
-uses no =symbol= layers, so labels are not needed for parity and are not in
-v1. After parity: point labels with a stable priority order first; line
+is much harder than placing them once for a layout, so they are not in v1.
+After v1: point labels with a stable priority order first; line
 labels later. Glyphs come in
 as font bytes from the embedder (no filesystem access, for wasm). The SVG
 backend can emit =<text>= and let the viewer shape it.
 
-** MAPLIBRE PARITY -- the v1 acceptance target
-What =DuckMap/ingestion/web/interactive_map.html= uses from MapLibre, as of
-2026-10-29:
-- Layer types: =fill=, =line=, =raster=. No =symbol= layers.
-- Sources: DuckMap's own MVT vector tiles; a PMTiles (MVT) basemap; XYZ raster
-  tiles.
-- Paint/layout: =fill-color=, =fill-opacity=, =line-color=, =line-width=,
-  =raster-opacity=, =visibility=, =minzoom= / =maxzoom=.
-- Interaction: click to popup, navigation control (zoom/rotate), =fitBounds=,
-  =load= and =error= events.
+** V1 FEATURES -- what v1 draws
+- Layer types: fill, line, raster. No labels (§ LABELS).
+- Sources: vector tiles as WKB, MVT or MLT, which the embedder may read out
+  of PMTiles; XYZ raster tiles.
+- Paint: fill and line colours with opacity, line width, raster opacity.
+  Visibility and zoom ranges are the embedder's (§ STYLING).
+- Interaction: picking, zoom and rotate about a point, fitting to bounds.
 
-*DuckMap's own tile route serves WKB per tile* (user decision, 2026-10-30),
-clipped and simplified by DuckDB, so its tiles need no decoder and skip
-MVT's integer quantization; popups need each feature's label beside it
-(carried in the same response; § V1 SLICE, step 6). *The
-nazca client is a new page beside the MapLibre one* (user decision,
-2026-10-30), so the two can be compared until parity is confirmed. The
-basemap still arrives inside PMTiles, as MVT or as MLT: DuckMap's
-=basemaps= table carries both.
+/Changed 2026-11-07 (user decision): this list no longer stands as a MapLibre
+parity target, and nazca makes no claim of parity./
 
 *MVT decoding lives in nazca, behind an =mvt= feature* (user decision,
 2026-10-29). A few hundred lines: protobuf varints, the MVT geometry command
 stream, feeding the sink directly with no intermediate geometry. Chosen over
 =geosetta= so a consumer showing a basemap does not have to link a format
-converter for it. Only geometry and feature ids are decoded; MVT properties
+converter for it (geosetta 0.27.0 reads no MVT). Only geometry and feature ids are decoded; MVT properties
 are skipped, matching nazca not holding attributes. Reading the PMTiles
 container (a directory lookup over byte ranges) is the embedder's I/O.
 
 /Implemented 2026-10-30 (=src/mvt.rs=)/, with *MLT beside it* (user,
-2026-10-30: the basemap ships in both encodings), behind an =mlt= feature
+2026-10-30), behind an =mlt= feature
 (=src/mlt.rs=), also with no dependency.
 - *MVT*: tiles, layers and features iterate over the borrowed bytes;
   =Feature::read(bounds, sink)= decodes the command stream straight into a
@@ -473,22 +462,11 @@ container (a directory lookup over byte ranges) is the embedder's I/O.
   basemap tile in both encodings is checked in (=tests/fixtures/basemap/=,
   census-derived) and decodes to the same geometry from both; locally, eight
   tile pairs from z0 to z6 do (=make_basemap_fixtures.sh=).
-- *Finding*: the tiler that built DuckMap's basemap (freestiler 0.3.0) writes
+- *Finding*: the tiler that built the fixture basemap (freestiler 0.3.0) writes
   MLT's 64-bit feature-id deltas without the zigzag encoding v1 requires
   ("each difference is zigzag-encoded ... whatever the stream's type"), so a
   conforming decoder reads them as wrapped negatives. nazca follows the spec
-  and does not guess the writer. The basemap is never picked, so nothing
-  depends on those ids; the geometry is unaffected.
-
-** WHAT MOVES OUT OF DUCKMAP
-=DuckMap/crates/duckmap-core/src/render.rs= is the starting material, but it
-mixes three jobs:
-- *To nazca*: drawing geometry, symbols, legend swatches, the north-arrow and
-  scale-bar graphics, raster colormapping and compositing.
-- *To =geoscribe=*: per-pane reprojection (=proj4rs= today), grid
-  convergence, geodesic distance, =raster_warp.rs=.
-- *Stays in DuckMap*: turning DB rows into nazca styles, Typst page layout,
-  MVT encoding for any remaining MVT consumers.
+  and does not guess the writer. The geometry is unaffected.
 
 ** V1 SLICE
 1. WKB reader, =Sink= trait and tile grid (done 2026-10-29: =src/wkb.rs=,
@@ -533,98 +511,9 @@ first. The Massachusetts counties go WKB -> =Sink= -> =MeshBuilder= ->
 5. =glow= backend: fills, shader-expanded lines, raster with a color lookup,
    ID-buffer picking (done 2026-10-30; § BACKENDS, § RASTER, § STYLING,
    § HIT-TESTING).
-6. *Acceptance*: DuckMap's Views mode runs on nazca with everything in
-   § MAPLIBRE PARITY, and a layout SVG is produced from the same prepared
-   data.
-   - /nazca's side, done 2026-10-30:/ the =mvt= and =mlt= decoders
-     (§ MAPLIBRE PARITY), zoom-dependent styles (§ STYLING), and the SVG
-     backend with =MeshBuilder::for_view= (§ BACKENDS).
-   - /DuckMap's side, done 2026-10-30/ (in the DuckMap repository):
-     - =duckmap-tiles= serves =/wkb_tiles/{view}/{layer}/{z}/{x}/{y}=: each
-       feature's WKB, longitude/latitude, simplified to a quarter of a
-       512-pixel tile's pixel and clipped to the tile plus 7% (a little over
-       nazca's guard band) by DuckDB, keeping only pieces of the layer's own
-       kind (=ST_CollectionExtract=). The body is a count, then per feature
-       a length-prefixed label and a length-prefixed WKB. *The labels ride
-       in the same response* rather than a separate sidecar request: one
-       query yields both, so they cannot fall out of step. Uncompressed,
-       a counties tile is about four times its MVT (13.5 KB against 3.2 KB
-       at z7); the route sets no compression yet.
-     - =crates/duckmap-nazca= is the wasm consumer (=wasm-pack build
-       --target web=, 428 KB). The page does the I/O and the DOM; the crate
-       holds the camera, one tile cache for every source, and one nazca layer
-       per =layer_styles= row, so a fill and its outline are two layers over
-       the same tiles, as in MapLibre. It reads the MapLibre paint JSON
-       itself (literal colours; numbers literal or zoom curves through
-       =style::interpolate=) and refuses with the property's name what it
-       cannot draw. WKB features are projected to Web Mercator in its sink,
-       as the spikes do. Tiles are selected for the CSS-pixel view at the
-       level =floor(zoom)=, as MapLibre fetches them, not at the device's
-       pixel ratio. A click picks the pickable layers (the view's own) and
-       returns the feature's label.
-     - =ingestion/web/nazca_map.html= is the page beside
-       =interactive_map.html=: the same tables over Quack, the same view
-       picker, basemap picker, legend toggles, raster overlay, navigation
-       buttons (zoom, compass), click popups and =fitBounds= on view change.
-       PMTiles are read with the =pmtiles= library, the same reader the
-       MapLibre page's protocol uses, and the tiles inside handed to nazca as
-       MVT or MLT; raster tiles are PNGs the browser decodes to RGBA.
-       /Export SVG/ writes the view from the same cached tile bytes,
-       re-prepared at the view's resolution and clipped exactly to each
-       tile (rasters left out).
-     - /Verified/ in Chrome against the MapLibre page: both views, all three
-       basemaps (PMTiles MVT, PMTiles MLT, hosted raster), the land-cover
-       overlay, popups, rotation, the SVG export. The two pages draw the same
-       map.
-     - /Found in use, 2026-10-30, and fixed in DuckMap's data, not in
-       nazca/:
-       - *County outlines gained no detail when zoomed in.* The route
-         stops simplifying as tiles shrink, but the counties were the
-         Census 1:20M cartographic boundary, so the detail was never there.
-         They are now the 1:500k boundary (3,222 counties, 1.03M vertices),
-         and the PMTiles basemap was rebuilt from them.
-       - *The basemap still showed its own edges beside the counties'.* It
-         stopped at z6, so further in it was a z6 tile stretched up to 64
-         times, its quantized edges stepping off the full-detail counties
-         drawn above it (the 0.9-opaque fill lets it show through). It now
-         goes to z12, where the tile route stops simplifying: 312,385
-         tiles, 57 MB as MVT and 60 MB as MLT, built in under a minute.
-       - *Every tile scanned the whole table.* DuckLake keeps no stats for a
-         GEOMETRY, so =ST_Intersects= pruned no files: a z10 roads tile at
-         Boston read all 52 roads files (431 MB) to keep 976 rows. The
-         counties, roads and cities tables now store each geometry's bbox
-         as =xmin=, =ymin=, =xmax=, =ymax= columns, and the route
-         range-tests them before =ST_Intersects=, so DuckLake skips files by
-         their min/max stats. That needs files that each cover a small
-         area: counties and cities are partitioned by =state_fips= and
-         Hilbert-sorted within each state; roads are inserted a state at a
-         time, which gives the same layout. The Boston box now reads 1 file
-         in each table instead of 52 (56 for cities). A z10 counties tile
-         fell from 0.87 s to 0.05 s, about the route's fixed cost per
-         request; low-zoom roads tiles (0.6--1.2 s at z4--z7) are now
-         dominated by simplifying and sending 1--2 MB of lines.
-       - The views' =source_sql= now selects =*=, so a scoped view's
-         subquery carries the bbox columns the range test reads.
-     - /Known limits/:
-       - /Fixed 2026-10-30, in nazca's SVG backend/: seams along tile edges
-         in the SVG, where neighbouring tiles' fills abutted as separate
-         paths. Any antialiasing viewer showed them, opaque fills too, not
-         only translucent ones and not only some viewers (§ BACKENDS).
-       - /Changed 2026-10-30:/ fetches no longer needed are dropped while
-         queued and, since then, aborted once started, freeing their slot;
-         on a fast zoom from z5 to z10 that aborted 12 and the view was
-         complete 4.5 s after the jump. The server drops an aborted request
-         still waiting for a query slot, so its query never runs (one slot
-         per core, measured). One already running runs to the end: a Quack
-         query cannot be cancelled on DuckDB 1.5. 2.0's =quack_cancel= can,
-         and DuckMap moves to 2.0 once DuckDB-Wasm has a 2.0 build
-         (=DuckMap/plans/duckdb-2.0.org=).
-       /Tried and reverted the same day/: fetching an ancestor two levels
-       up as a stand-in, first in the queue, and capping stand-ins at two
-       levels. The cap blanked the screen after a fast zoom, which other
-       maps do not do, and the extra tiles (a z8 roads tile is as slow to
-       build as the z10 tiles it stands in for) made the view slower to
-       complete.
+6. The =mvt= and =mlt= decoders (§ V1 FEATURES), zoom-dependent styles
+   (§ STYLING), and the SVG backend with =MeshBuilder::for_view=, so a layout
+   comes from the same preparation (done 2026-10-30; § BACKENDS).
 
 *So v1 does not foreclose the globe* (§ GLOBE), it must also have:
 - a camera built on a 4x4 matrix (§ CAMERA);
@@ -632,19 +521,19 @@ first. The Massachusetts counties go WKB -> =Sink= -> =MeshBuilder= ->
 - tile selection behind a trait (§ TILE GRIDS);
 - mesh-warp raster drawing (§ RASTER).
 These are cheap now and expensive to retrofit. The globe itself (camera
-controls, sphere tile selection, polar caps, densification wiring in DuckMap)
+controls, sphere tile selection, polar caps, densification wiring in the embedder)
 is the milestone after v1.
 
 ** OPEN QUESTIONS
 1. /Closed 2026-10-29 (user decision): the charter test. Two questions,
    CRS-dependence first, then whether the result is returned as data; see
    [[file:../project.org][../project.org]] § CHARTER and
-   =geoscribe/project.org= § CHARTER./
+   =geoscribe/project.org= § CHARTER (as of 0.5.1)./
 2. /Closed 2026-10-29 (user decision): MVT decoding is a nazca =mvt=
-   feature (§ MAPLIBRE PARITY)./
+   feature (§ V1 FEATURES)./
 3. /Closed 2026-10-29 (user decision): tiered dependency policy
    ([[file:../project.org][../project.org]] § DEPENDENCY POLICY)./
 4. /Closed 2026-10-29 (user decision): structs plus callback for v1, a
    MapLibre-spec adapter possibly later (§ STYLING)./
-5. /Closed 2026-10-29 (user decision): labels after MapLibre parity, point
+5. /Closed 2026-10-29 (user decision): labels after v1, point
    labels first (§ LABELS)./

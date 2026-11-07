@@ -1,12 +1,15 @@
 #!/bin/sh
-# Cuts matching MVT and MLT tiles from DuckMap's PMTiles basemaps into
+# Cuts matching MVT and MLT tiles from PMTiles basemaps into
 # tests/fixtures/local/basemap/ (not checked in), for the ignored
 # `every_local_basemap_tile_decodes_alike` test.
 #
-#   tests/fixtures/make_basemap_fixtures.sh [path/to/DuckMap/ingestion/data/basemaps]
+#   tests/fixtures/make_basemap_fixtures.sh path/to/basemaps
+#
+# The directory holds counties_basemap_mvt.pmtiles and
+# counties_basemap_mlt.pmtiles.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
-src=${1:-$here/../../../../DuckMap/ingestion/data/basemaps}
+src=${1:?usage: make_basemap_fixtures.sh path/to/basemaps}
 out=$here/local/basemap
 mkdir -p "$out"
 for zxy in "0 0 0" "1 0 0" "2 1 1" "3 2 2" "4 4 5" "5 9 11" "6 19 23" "6 13 24"; do

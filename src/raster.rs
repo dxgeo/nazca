@@ -8,8 +8,8 @@
 //! third-party basemap's, are kept as they are.
 //!
 //! *Mesh warp.* An image in one CRS shown in another needs warping, which is
-//! CRS math and so the caller's, through `geoscribe` (`../project.org` §
-//! CHARTER). The caller projects a coarse control grid -- say 16 x 16 points
+//! CRS math and so the caller's, in time through `geoscribe`, which plans it
+//! as of 0.5.1 (`../project.org` § CHARTER). The caller projects a coarse control grid -- say 16 x 16 points
 //! -- and [`RasterMesh::warped`] stretches the image over it; the GPU
 //! interpolates between control points, a fraction of a pixel off for most
 //! projections at tile scale. An image already in the map's CRS is

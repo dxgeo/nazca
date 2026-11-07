@@ -26,11 +26,13 @@ Current version: 0.1.0.
 -   **Compose rather than embed.** Nazca does not read files, fetch tiles,
     open windows or reproject. It names the tiles a camera needs, and the
     embedder fetches them and hands the bytes in. Coordinates arrive in the
-    map's CRS, already projected by something like
-    [Geoscribe](https://github.com/dxgeo/geoscribe).
--   **No sibling dependencies.** Like [Geosetta](https://github.com/dxgeo/geosetta)
-    and Geoscribe, Nazca depends on neither of them, and neither depends on
-    it. A caller that links several of them wires them together.
+    map's CRS, already projected by the caller. Reprojection is planned for
+    [Geoscribe](https://github.com/dxgeo/geoscribe), but is not implemented
+    as of its 0.5.1.
+-   **No sibling dependencies.** Nazca depends on neither
+    [Geosetta](https://github.com/dxgeo/geosetta) nor Geoscribe, and neither
+    depends on it as of Geosetta 0.27.0 and Geoscribe 0.5.1. A caller that
+    links several of them wires them together.
 
 
 ## SETUP

@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn zoom_curves_interpolate_like_maplibre() {
-        // DuckMap's city circles: radius 1 at z3 to 5 at z10.
+        // City circles: radius 1 at z3 to 5 at z10.
         let stops = [(3.0, 1.0), (10.0, 5.0)];
         assert_eq!(interpolate(&stops, 1.0, 0.0), 1.0);
         assert_eq!(interpolate(&stops, 1.0, 6.5), 3.0);

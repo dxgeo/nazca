@@ -3,9 +3,9 @@
 //! It never builds a geometry and never allocates: coordinates are decoded
 //! from the borrowed bytes in blocks of [`BLOCK`] into a stack buffer and
 //! handed to the sink a block at a time. That is the point of nazca having
-//! its own reader rather than linking `geosetta`'s, which decodes into an
-//! owned `Geometry` tree (a format converter needs the whole geometry in
-//! hand; a renderer only needs to see each coordinate once).
+//! its own reader rather than linking `geosetta`'s, which as of 0.27.0 decodes
+//! into an owned `Geometry` tree (a format converter needs the whole geometry
+//! in hand; a renderer only needs to see each coordinate once).
 //!
 //! Accepted, so that bytes from any producer work:
 //! - both byte orders, chosen independently by every nested geometry;

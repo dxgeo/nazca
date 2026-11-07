@@ -1,13 +1,12 @@
 #!/bin/sh
-# Regenerates nazca's WKB test fixtures from DuckMap's DuckLake catalog.
+# Regenerates nazca's WKB test fixtures from a DuckLake catalog with a
+# `counties` table (geoid, name, state_fips, geom).
 #
-#   tests/fixtures/make_fixtures.sh [path/to/duckmap.ducklake]
+#   tests/fixtures/make_fixtures.sh path/to/catalog.ducklake
 #
-# The default path assumes DuckMap is checked out beside geocore.
-#
-# Needs the `duckdb` CLI (1.5.x) with the spatial extension. DuckMap's tile
-# server must be stopped: a second process cannot ATTACH the catalog while it
-# holds it.
+# Needs the `duckdb` CLI (1.5.x) with the spatial extension. Nothing else may
+# have the catalog open: a second process cannot ATTACH it while another holds
+# it.
 #
 # Writes one TSV per fixture, one row per county. Every column but the last
 # is DuckDB's own answer for that geometry, so the WKB reader is checked
@@ -21,7 +20,7 @@
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
-catalog=${1:-$here/../../../../DuckMap/ingestion/data/duckmap.ducklake}
+catalog=${1:?usage: make_fixtures.sh path/to/catalog.ducklake}
 catalog=$(cd "$(dirname "$catalog")" && pwd)/$(basename "$catalog")
 mkdir -p "$here/local"
 
@@ -36,15 +35,15 @@ columns="geoid, name, ST_GeometryType(geom) AS type,
 
 duckdb -c "
 LOAD spatial;
-ATTACH 'ducklake:$catalog' AS duckmap (READ_ONLY);
+ATTACH 'ducklake:$catalog' AS catalog (READ_ONLY);
 COPY (
-    SELECT $columns FROM duckmap.counties
+    SELECT $columns FROM catalog.counties
     WHERE state_fips = '25'
        OR (SELECT sum(ST_NumInteriorRings(d.geom))
              FROM (SELECT unnest(ST_Dump(geom)) AS d)) > 0
     ORDER BY geoid
 ) TO '$here/counties_sample.tsv' (HEADER, DELIMITER '\t');
 COPY (
-    SELECT $columns FROM duckmap.counties ORDER BY geoid
+    SELECT $columns FROM catalog.counties ORDER BY geoid
 ) TO '$here/local/us_counties.tsv' (HEADER, DELIMITER '\t');
 "

@@ -1,11 +1,10 @@
 //! The geometry sink: how coordinates reach nazca from any source.
 //!
 //! A reader (nazca's own [`crate::wkb`], or a caller's adapter over
-//! `geo-types`, GeoArrow, `geosetta`'s IR, ...) drives a [`Sink`] with a
-//! stream of events instead of building a geometry tree, so nothing about a
-//! geometry is held longer than it takes to pass through. This is the same
-//! "name the capability, not the provider" shape as the retired
-//! `CrsRegistry` trait (`../architecture.org`).
+//! `geo-types`, GeoArrow, `geosetta`'s IR as its main has it after 0.27.0, ...)
+//! drives a [`Sink`] with a stream of events instead of building a geometry
+//! tree, so nothing about a geometry is held longer than it takes to pass
+//! through.
 
 /// Receives one geometry at a time as a stream of events.
 ///

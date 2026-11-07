@@ -5,8 +5,8 @@
 //!   (`fixtures/fetch_mlt_fixtures.sh`; ignored until fetched).
 //! - MVT and MLT: one Massachusetts basemap tile, cut by the same tiler from
 //!   the same counties in both encodings (`fixtures/basemap/`, z6/19/23 from
-//!   DuckMap's PMTiles basemaps, census-derived), decodes to the same
-//!   geometry, feature for feature.
+//!   PMTiles basemaps, census-derived), decodes to the same geometry, feature
+//!   for feature.
 
 use nazca::grid::Rect;
 use nazca::{Sink, mlt, mvt};

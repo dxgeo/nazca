@@ -4,7 +4,7 @@
 //!
 //!   cargo run -p nazca --features mlt --example layout -- out.svg [--bearing 20]
 //!
-//! Two layers on an 8 x 6 inch page at 150 dpi: DuckMap's MLT basemap tile
+//! Two layers on an 8 x 6 inch page at 150 dpi: an MLT basemap tile
 //! for Massachusetts (decoded by nazca's `mlt` feature) under the WKB
 //! counties of `tests/fixtures/counties_sample.tsv`.
 

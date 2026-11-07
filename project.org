@@ -11,31 +11,31 @@ interactive maps and generates static layouts, and the two are equally
 important: one pipeline serves both, differing only in whether prepared
 geometry is cached and redrawn every frame or drawn once at print resolution.
 
-It is meant to be *lightweight, fast and memory-efficient*, to run the same
-natively and in WebAssembly, and to draw what a MapLibre GL map draws. The
-design is in [[file:plans/rendering.org][plans/rendering.org]].
+It is meant to be *lightweight, fast and memory-efficient*, and to run the
+same natively and in WebAssembly. The design is in
+[[file:plans/rendering.org][plans/rendering.org]].
 
 ** SCOPE -- decided 2026-10-29 (user decisions)
 - *Interactive mapping and layouts are equally important.* Neither is a
   by-product of the other.
-- *MapLibre GL parity is the first target.* Fill, line and raster layers
-  over vector, PMTiles and XYZ raster tiles, their paint properties and zoom
-  ranges, picking, rotation and fitting to bounds (plans/rendering.org §
-  MAPLIBRE PARITY).
+- *The v1 features come first.* Fill, line and raster layers over vector,
+  PMTiles and XYZ raster tiles, their paint properties, picking, rotation and
+  fitting to bounds (plans/rendering.org § V1 FEATURES).
 - *Native is in scope*, not only the browser.
 - *Raster goes through the same tile cache as vector.*
-- *Globe view is wanted, after MapLibre parity.* v1 is designed so it is not
+- *Globe view is wanted, after v1.* v1 is designed so it is not
   foreclosed (plans/rendering.org § GLOBE).
 - *Lightweight, fast, memory-efficient.* These are the deciding criteria
   when two designs otherwise tie.
 - *Works best with =geosetta=, works with any I/O library.* Because there
   are no dependency edges (§ ARCHITECTURE), "best with geosetta" cannot mean
   a geosetta feature. It means geosetta's outputs (WKB, stored bboxes,
-  Hilbert-sorted FlatGeobuf) are the inputs nazca handles best -- and,
-  for a caller linking both, geosetta's IR read in place: an adapter walks
-  =GeometryRef::shape= into a =Sink=, a flat 2D run handed to =points= as
-  the slice it is held in (=geosetta/plans/columnar.org= D-C17, tested in
-  =geosetta/tests/nazca_sink.rs=).
+  Hilbert-sorted FlatGeobuf, as of 0.27.0) are the inputs nazca handles best
+  -- and, for a caller linking both, geosetta's IR read in place: an adapter
+  walks =GeometryRef::shape= into a =Sink=, a flat 2D run handed to =points=
+  as the slice it is held in (=geosetta/plans/columnar.org= D-C17, tested in
+  =geosetta/tests/nazca_sink.rs=). That seam is newer than geosetta 0.27.0:
+  true of its main at =5101342=, unreleased.
 - *Dependencies are allowed.* Unlike its siblings, nazca does not have to be
   standard-library only, because some of rendering (GPU access, rasterization,
   glyphs) would be prohibitive to hand-write. See § DEPENDENCY POLICY.
@@ -45,7 +45,8 @@ design is in [[file:plans/rendering.org][plans/rendering.org]].
 - *Reprojection.* Nazca applies camera transforms only: affine for flat maps,
   perspective for a globe. Coordinates arrive in the map's CRS (geocentric
   XYZ for a globe); projecting them is =geoscribe='s job, wired by the
-  caller. § CHARTER draws the line.
+  caller, though as of geoscribe 0.5.1 it is planned, not implemented.
+  § CHARTER draws the line.
 - *I/O.* Nazca fetches nothing and reads no files. It names the tiles a
   camera needs; the embedder fetches them (HTTP, Quack, a file, geosetta)
   and hands the bytes in.
@@ -67,7 +68,7 @@ External crates are allowed; sibling crates are not (that would be an edge,
   =text= (a small glyph rasterizer such as =ab_glyph= or =fontdue=).
 - *=mvt= and =mlt= are features too, with no dependency*: small hand-written
   decoders for third-party basemaps in either vector tile encoding
-  (plans/rendering.org § MAPLIBRE PARITY).
+  (plans/rendering.org § V1 FEATURES).
 - *Pure Rust only, no C build scripts.* A =cc= build step breaks
   =wasm32-unknown-unknown= (=proj4rs-geodesic='s does). Any dependency must
   build for that target unmodified.
@@ -78,7 +79,8 @@ External crates are allowed; sibling crates are not (that would be an edge,
   =unsafe=.
 
 ** CHARTER -- decided 2026-10-29 (user decision)
-=geoscribe/project.org= § CHARTER claims all vector and raster math. Rendering
+=geoscribe/project.org= § CHARTER (as of 0.5.1) claims all vector and raster
+math, though 0.5.1 implements none of what the table below gives it. Rendering
 needs render-time forms of some of it, and nazca cannot reach =geoscribe= to
 get them, so the charter carves them out the same way it carves out what
 =geosetta='s formats need. Two questions, asked in order:
@@ -111,30 +113,12 @@ The cost is deliberate duplication: nazca's same-pixel decimation is not
 =geoscribe='s simplification. A layout wanting real generalization has the
 caller run =geoscribe='s and hand nazca the result.
 
-** HISTORY -- the reprojection crate it was planned as
-Until 2026-10-22 Nazca was scoped as the ecosystem's reprojection crate:
-projection math, datum shift and transformed bounds, behind a =CrsRegistry=
-trait that callers implemented because the crate held no CRS data of its own.
-Nothing of it was implemented.
-
-On 2026-10-22 (user decision) reprojection, and vector/raster math generally,
-moved to =geoscribe=, which already holds the CRS database the math needs. The
-plans moved too, with their content intact:
-- [[file:../geoscribe/plans/reprojection.org][geoscribe/plans/reprojection.org]]
-- [[file:../geoscribe/plans/transform-bounds.org][geoscribe/plans/transform-bounds.org]]
-
-So did this file's =CHARTER= section, the falsifiable test for which math
-belongs where. It is now =geoscribe/project.org= § CHARTER. The old version of
-this file is not in any git history (=nazca/= was untracked until
-2026-10-29); the charter text survives there, and the reprojection roadmap
-survives in geoscribe's =plans/todo.org=.
-
-On 2026-10-29 the rendering scope above was written down.
-
 ** ARCHITECTURE
 A peer of =geosetta= and =geoscribe=, with no dependency edges in either
-direction ([[file:../architecture.org][../architecture.org]] § THE
-COMPOSITION MODEL). Whatever Nazca renders, it reaches the other two through a
+direction as of geosetta 0.27.0 and geoscribe 0.5.1
+([[file:../architecture.org][../architecture.org]] § THE COMPOSITION MODEL).
+Geosetta's main after 0.27.0 (=5101342=) takes nazca as a dev-dependency for
+one test, =tests/nazca_sink.rs=, and its library still does not. Whatever Nazca renders, it reaches the other two through a
 caller that links them or through a pipe between CLIs, never through a
 =Cargo.toml= dependency. External crates (§ DEPENDENCY POLICY) do not create
 such an edge.
@@ -143,13 +127,13 @@ A browser binding (=wasm-bindgen=) belongs in a separate consumer crate, not
 as a =cdylib= inside nazca ([[file:../wasm-plan.org][../wasm-plan.org]]).
 
 ** STATUS
-Scope written 2026-10-29. Implemented: v1 slice steps 1--5 -- the =Sink=
+Scope written 2026-10-29. Implemented: v1 slice steps 1--6 -- the =Sink=
 trait, the streaming WKB reader, the tile grid, prepare (snapping, clipping,
-earcut), the tile cache, the camera with its tile-selection trait, and the
+earcut), the tile cache, the camera with its tile-selection trait, the
 =glow= backend (palette-styled fills, shader-expanded lines and points,
-colormapped and mesh-warped rasters, ID-buffer picking) -- and the spike
-drawing and picking counties tile by tile through them, natively and in a
-browser. Step 6: the MVT and MLT decoders, zoom-dependent styles and the SVG
-backend, with a layout example (plans/rendering.org § V1 SLICE). See
+colormapped and mesh-warped rasters, ID-buffer picking), the MVT and MLT
+decoders, zoom-dependent styles and the SVG backend, with a layout example
+(plans/rendering.org § V1 SLICE) -- and the spike drawing and picking counties
+tile by tile through them, natively and in a browser. See
 [[file:plans/rendering.org][plans/rendering.org]] and
 [[file:plans/todo.org][plans/todo.org]].

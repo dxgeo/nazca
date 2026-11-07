@@ -1,6 +1,5 @@
-//! Reads real county geometry (DuckDB's `ST_AsWKB` output, from DuckMap's
-//! catalog) and checks every count and bound against DuckDB's own answer for
-//! the same geometry. See `fixtures/make_fixtures.sh` for how the TSVs are
+//! Reads real county geometry (DuckDB's `ST_AsWKB` output) and checks every
+//! count and bound against DuckDB's own answer for the same geometry. See `fixtures/make_fixtures.sh` for how the TSVs are
 //! made and what each column is.
 
 use nazca::{Sink, wkb};

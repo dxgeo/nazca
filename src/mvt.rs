@@ -1,5 +1,5 @@
 //! Mapbox Vector Tile decoding, for third-party basemaps (`../plans/rendering.org`
-//! § MAPLIBRE PARITY). Enabled by the `mvt` feature, which adds no dependency.
+//! § V1 FEATURES). Enabled by the `mvt` feature, which adds no dependency.
 //!
 //! A tile is protocol buffers: [`layers`] walks its layers and
 //! [`Layer::features`] a layer's features, borrowing the tile's bytes

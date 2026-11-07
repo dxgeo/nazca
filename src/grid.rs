@@ -9,7 +9,8 @@
 //!
 //! Everything here is in *map units*, the units of the coordinates the caller
 //! hands nazca. Nothing converts longitude/latitude: that is CRS math, and it
-//! belongs to `geoscribe` (`../project.org` § CHARTER).
+//! belongs to `geoscribe`, which plans it as of 0.5.1 (`../project.org` §
+//! CHARTER).
 //!
 //! Rows count *down* from the origin, as XYZ tiles do: the origin is the grid's
 //! top-left corner, row 0 is the top row, and map Y decreases as rows increase.

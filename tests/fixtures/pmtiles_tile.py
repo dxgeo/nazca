@@ -3,9 +3,8 @@
 
     python3 -I tests/fixtures/pmtiles_tile.py ARCHIVE Z X Y OUT
 
-How tests/fixtures/basemap/ma_6_19_23.{mvt,mlt} were cut from DuckMap's
-basemaps (ingestion/data/basemaps/counties_basemap_{mvt,mlt}.pmtiles), and
-how `make_basemap_fixtures.sh` fills tests/fixtures/local/basemap/. nazca
+How tests/fixtures/basemap/ma_6_19_23.{mvt,mlt} were cut from
+counties_basemap_{mvt,mlt}.pmtiles, and how `make_basemap_fixtures.sh` fills tests/fixtures/local/basemap/. nazca
 itself reads no containers: this is test tooling.
 """
 import gzip, struct, sys
