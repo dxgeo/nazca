@@ -266,6 +266,62 @@ transparent. =Pick { layer, feature }=, with =layer= the embedder's number.
 Rasters are not picked and do not hide features below them. Verified
 natively and in Chrome's WebGL2 on the counties.
 
+** FEATURE STATE -- decided 2026-11-09 (user decision), not built
+An embedder needs to draw chosen features differently, a selection or a
+hover, any number of them at once, the moment they are chosen. The tiles are
+already prepared and uploaded, and every vertex already carries its feature
+id, so nothing about the geometry should have to change.
+
+- *A state is a byte of flags per feature, per mesh.* A small texture holds
+  one byte for each feature in a span of ids, built from the first id and the
+  bytes the embedder gives. Each bit is a state of its own, so a feature can
+  be selected and hovered at once; 0 means none. An id outside the span holds
+  no state, and the shader checks for that. The texture wraps onto rows, so a
+  tile with many features stays within the texture size limit. Ids need not
+  be dense: a gap in them costs only its bytes, and nazca tracks no id range.
+- *The embedder owns the state texture*, as it does a =GpuMesh= or
+  =GpuPalette=: it creates and frees one per mesh, and counts its =bytes()=
+  against the tile budget.
+- *A state draw is an extra pass over the mesh.* The new draw takes the mesh,
+  a palette, the state texture and a mask of the bits to draw, and shows only
+  the features holding one of them. The rest emit nothing: fills go outside
+  the clip volume and lines and points get no width. The vertex shaders do the
+  test, first, so a feature not drawn skips the projection and palette work,
+  and the line shader already reads a texture there. Stencil claims work as in
+  any draw, so a feature split across tiles blends once. The test is a shader
+  variant of its own, as picking is, so a normal draw pays nothing.
+- *The pass runs over the whole mesh*, however few features are drawn, which
+  matters only where a tile's vertex work already limits the frame rate. If
+  it does, the draw can be narrowed to the span from the first drawn feature
+  to the last without changing the API; not built until a measurement asks.
+- *The look is an ordinary palette.* It is uploaded before any feature is
+  chosen, and zoom curves rewrite it as for any layer. A state draw can be
+  given any palette, draw order and min/max zoom the embedder likes, and a
+  feature can be given several passes, which is what makes it an extra pass
+  rather than a colour swap: swapped in place, a feature stays under its
+  neighbours and any layer above it.
+- *Changing a state rewrites only the textures of the tiles it touches.* No
+  geometry is prepared or uploaded, and nothing is fetched. A mesh with no
+  feature in a state needs no texture and no pass, so a map with nothing
+  chosen costs nothing.
+- *Nazca holds no meaning.* It is given bytes against its own feature ids.
+  Which features are chosen, the embedder's own ids for them across tiles, and
+  what a state is called are all the embedder's, as with attributes (project.org
+  § WHAT NAZCA DOES NOT DO).
+
+Ruled out: re-preparing a mesh with a new style class per feature (the whole
+tile is rebuilt per click); a single selected-id uniform (one feature at a
+time); and building a separate small mesh from the tile's source bytes (more
+memory and a second path through prepare for what the mesh already holds).
+
+Only the =gl= backend. Nothing needs a state in SVG output yet.
+
+No area pick, decided 2026-11-09 (user decision). =gl::Picker= stays one
+pixel. Box or lasso selection belongs to the embedder, against its source
+geometry: an area pick over tiles would miss features hidden behind others in
+their layer and features simplified away or dropped at that zoom, and it
+wouldn't say so. The embedder hands the result in as feature state.
+
 ** CAMERA
 Pan, zoom about a point, rotate, =fit_bounds=, and easing for animated
 moves. Pure math with no event handling; the embedder calls it from its own
