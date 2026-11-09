@@ -6,7 +6,7 @@ WebAssembly. Geometry is prepared once into tiles, then either redrawn every
 frame by the GPU backend or written once at print resolution by the SVG
 backend.
 
-Current version: 0.1.0.
+Current version: 0.2.0.
 
 
 ## PHILOSOPHY

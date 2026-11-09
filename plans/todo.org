@@ -7,5 +7,4 @@ Live list of what's open right now. Each entry is just a link to its real
 plan/section for detail; check it off and remove it once the item ships or is
 shelved.
 
-- [ ] Feature state: drawing chosen features from an already-loaded mesh
-  ([[file:rendering.org::*FEATURE STATE][rendering.org § FEATURE STATE]]).
+Nothing is open right now. The v1 slice is built.

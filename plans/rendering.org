@@ -320,7 +320,13 @@ Only the =gl= backend. Nothing needs a state in SVG output yet.
 hover bit. =--check-state= (C in the browser) reads back a grid of 2,500
 features per primitive for wrapped rows, span edges, ids wrapping past the top
 of the range, masks and rewritten flags. Verified natively and in Chrome's
-WebGL2. Not yet measured on a tile whose vertex work limits the frame rate.
+WebGL2.
+
+/Measured 2026-11-09/ in Chrome at 2798x1604, on a layer of 266,561 lines drawn
+at zoom 4.76 under fills and points, with the GPU forced to finish: 39-43 ms a
+frame with nothing chosen, about 1 ms more with one line chosen in the densest
+tile, about 9 ms more with a quarter of the lines chosen, and about 15 ms more
+again for a second, 5-pixel pass. So the narrowing above is not needed yet.
 
 No area pick, decided 2026-11-09 (user decision). =gl::Picker= stays one
 pixel. Box or lasso selection belongs to the embedder, against its source
