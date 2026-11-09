@@ -3,7 +3,8 @@
 //! tile selector and tile cache and drawn by its `gl` backend in a winit
 //! window over an OpenGL 3.3 core context. Drag to pan, scroll to zoom about
 //! the cursor, right-drag to rotate about the window's centre, click to pick
-//! a county, and press R to cycle the raster overlay.
+//! a county and toggle its selection, press H to toggle a hover state on the
+//! county picked last, and press R to cycle the raster overlay.
 //!
 //!   cargo run -p nazca --features gl --example spike
 //!   cargo run -p nazca --features gl --example spike -- --screenshot out.png
@@ -13,7 +14,10 @@
 //! opens the map turned that many degrees, east of north up. `--raster`
 //! (`continuous` or `categorical`) opens with that overlay. `--pick X,Y`
 //! picks at that window pixel after the first frame and prints the county.
-//! `--zoom F` opens zoomed in F times about the window's centre.
+//! `--zoom F` opens zoomed in F times about the window's centre. `--select
+//! X,Y` and `--hover X,Y` (each repeatable) give the county at that pixel a
+//! state after the first frame. `--check-state` reads back a synthetic grid
+//! of features drawn by state, reports and exits.
 
 mod data;
 mod tiles;
@@ -29,7 +33,7 @@ use nazca::Camera;
 use nazca::gl::Renderer;
 use raw_window_handle::HasWindowHandle;
 use std::num::NonZeroU32;
-use tiles::TiledMap;
+use tiles::{HOVERED, SELECTED, TiledMap};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -51,6 +55,9 @@ struct Options {
     bearing: f64,
     overlay: Overlay,
     pick: Option<[f64; 2]>,
+    /// Pixels whose counties get a state after the first frame.
+    states: Vec<([f64; 2], u8)>,
+    check_state: bool,
     zoom: f64,
 }
 
@@ -68,6 +75,16 @@ struct App {
 impl App {
     fn redraw(&mut self) {
         let (Some(g), Some(camera)) = (&mut self.gfx, &self.camera) else { return };
+        if self.options.check_state {
+            match tiles::check_state(&g.gl, &g.renderer, camera.size_px) {
+                Ok(report) => println!("{report}"),
+                Err(e) => {
+                    eprintln!("state check failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
         let stats = g.map.draw(&g.gl, &g.renderer, camera);
         if stats.prepared > 0 {
             println!(
@@ -81,6 +98,13 @@ impl App {
         }
         if let Some(px) = self.options.pick.take() {
             report(g.map.pick(&g.gl, &g.renderer, camera, px), px);
+        }
+        for (px, bit) in std::mem::take(&mut self.options.states) {
+            let pick = g.map.pick(&g.gl, &g.renderer, camera, px);
+            report(pick, px);
+            if let Some((_, id)) = pick {
+                g.map.toggle(&g.gl, &g.renderer, id, bit);
+            }
         }
         if let Some(path) = self.options.screenshot.take() {
             let [w, h] = camera.size_px;
@@ -174,7 +198,11 @@ impl ApplicationHandler for App {
                         // A press and release in nearly one place is a click.
                         if start.is_some_and(|s| (s.x - self.cursor.x).abs() + (s.y - self.cursor.y).abs() < 4.0) {
                             let px = [self.cursor.x, self.cursor.y];
-                            report(g.map.pick(&g.gl, &g.renderer, camera, px), px);
+                            let pick = g.map.pick(&g.gl, &g.renderer, camera, px);
+                            report(pick, px);
+                            if let Some((_, id)) = pick {
+                                g.map.toggle(&g.gl, &g.renderer, id, SELECTED);
+                            }
                         }
                     }
                 }
@@ -206,6 +234,7 @@ impl ApplicationHandler for App {
                     g.map.set_overlay(&g.gl, &g.renderer, next);
                     println!("overlay: {next:?}");
                 }
+                Key::Character(c) if c.eq_ignore_ascii_case("h") => g.map.toggle_last(&g.gl, &g.renderer, HOVERED),
                 Key::Named(NamedKey::Escape) => event_loop.exit(),
                 _ => return,
             },
@@ -223,12 +252,21 @@ impl ApplicationHandler for App {
 
 fn main() {
     let usage = || -> ! {
-        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--zoom F]");
+        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--check-state]");
         std::process::exit(2);
     };
-    let mut options = Options { screenshot: None, bearing: 0.0, overlay: Overlay::None, pick: None, zoom: 1.0 };
+    let mut options = Options { screenshot: None, bearing: 0.0, overlay: Overlay::None, pick: None, states: Vec::new(), check_state: false, zoom: 1.0 };
     let mut args = std::env::args().skip(1);
+    let point = |value: &str| -> [f64; 2] {
+        let xy: Vec<f64> = value.split(',').map(|v| v.parse().unwrap_or_else(|_| usage())).collect();
+        let [x, y] = xy[..] else { usage() };
+        [x, y]
+    };
     while let Some(flag) = args.next() {
+        if flag == "--check-state" {
+            options.check_state = true;
+            continue;
+        }
         let value = args.next().unwrap_or_else(|| usage());
         match flag.as_str() {
             "--screenshot" => options.screenshot = Some(value),
@@ -241,11 +279,9 @@ fn main() {
                     _ => usage(),
                 }
             }
-            "--pick" => {
-                let xy: Vec<f64> = value.split(',').map(|v| v.parse().unwrap_or_else(|_| usage())).collect();
-                let [x, y] = xy[..] else { usage() };
-                options.pick = Some([x, y]);
-            }
+            "--pick" => options.pick = Some(point(&value)),
+            "--select" => options.states.push((point(&value), SELECTED)),
+            "--hover" => options.states.push((point(&value), HOVERED)),
             _ => usage(),
         }
     }

@@ -89,6 +89,10 @@ impl Counties {
         Counties { counties, bounds }
     }
 
+    pub fn len(&self) -> usize {
+        self.counties.len()
+    }
+
     /// The county a picked feature id names.
     pub fn name(&self, feature: u32) -> Option<&'static str> {
         self.counties.get(feature as usize).map(|c| c.name)
@@ -127,6 +131,15 @@ pub fn palette() -> Palette {
     let mut p = Palette::new();
     for (i, fill) in FILLS.into_iter().enumerate() {
         p.set(1 + i as u8, Style { fill, line: [0.25, 0.27, 0.30, 1.0], line_width: 1.25, point_size: 0.0 });
+    }
+    p
+}
+
+/// The look of a chosen county, in every class the counties use.
+pub fn highlight(fill: [f32; 4], line: [f32; 4], line_width: f32) -> Palette {
+    let mut p = Palette::new();
+    for class in 1..=6 {
+        p.set(class, Style { fill, line, line_width, point_size: 0.0 });
     }
     p
 }

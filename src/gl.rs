@@ -14,6 +14,9 @@
 //!   shader through a [`Colormap`] texture.
 //! - *Picking* draws feature ids instead of colours into a one-pixel integer
 //!   framebuffer and reads it back ([`Picker`]).
+//! - *Feature state* draws a mesh again showing only the features whose
+//!   flags a small texture marks ([`Renderer::draw_state`]), so choosing a
+//!   feature rewrites one texture and touches no geometry.
 //!
 //! *Each pixel belongs to one tile.* Tiles overlap -- each keeps a guard
 //! band past its edge, and an ancestor standing in for a missing tile
@@ -45,6 +48,23 @@ const IDENTITY: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1
 const VERTEX_BYTES: usize = 16;
 /// Bytes a segment instance: both ends' X and Y, the class, the feature id.
 const SEGMENT_BYTES: usize = 24;
+/// Features a row of a state texture; `STATE_VS` wraps on the same number.
+/// OpenGL 3.3 guarantees textures this wide.
+const STATE_ROW: usize = 1024;
+
+// Prepended to a vertex shader for a state draw. Ids wrap as `uint`s, so a
+// span may run past the top of the range; any id outside it holds no state.
+const STATE_VS: &str = r#"
+uniform highp usampler2D u_state;
+uniform uint u_state_first;
+uniform uint u_state_count;
+uniform uint u_state_mask;
+bool has_state(uint id) {
+    uint i = id - u_state_first;
+    if (i >= u_state_count) return false;
+    return (texelFetch(u_state, ivec2(i & 1023u, i >> 10u), 0).r & u_state_mask) != 0u;
+}
+"#;
 
 const FILL_VS: &str = r#"
 layout(location = 0) in vec2 a_pos;
@@ -55,6 +75,12 @@ uniform mat4 u_post;
 flat out int v_class;
 flat out uint v_id;
 void main() {
+#ifdef STATE
+    if (!has_state(a_id)) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
+#endif
     gl_Position = u_post * (u_matrix * vec4(a_pos, 0.0, 1.0));
     v_class = int(a_class + 0.5);
     v_id = a_id;
@@ -104,6 +130,12 @@ vec2 to_px(vec2 p) {
     return (c.xy / c.w * 0.5 + 0.5) * u_viewport;
 }
 void main() {
+#ifdef STATE
+    if (!has_state(a_id)) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
+#endif
     int cls = int(a_class + 0.5);
     vec4 sizes = texelFetch(u_palette, ivec2(cls, 2), 0);
     float width = u_points != 0 ? sizes.y : sizes.x;
@@ -227,17 +259,19 @@ impl Program {
     }
 }
 
-/// Whether a draw goes to the screen or to the picker.
+/// Whether a draw goes to the screen, to the screen for the features holding
+/// a state, or to the picker.
 #[derive(Clone, Copy)]
 enum Mode {
     Screen,
+    State { texture: glow::Texture, first: u32, count: u32, mask: u32 },
     Pick { post: [f32; 16], layer: u32, min_half: f32 },
 }
 
 impl Mode {
     fn post(&self) -> [f32; 16] {
         match self {
-            Mode::Screen => IDENTITY,
+            Mode::Screen | Mode::State { .. } => IDENTITY,
             Mode::Pick { post, .. } => *post,
         }
     }
@@ -248,8 +282,10 @@ impl Mode {
 pub struct Renderer {
     fill: Program,
     fill_pick: Program,
+    fill_state: Program,
     line: Program,
     line_pick: Program,
+    line_state: Program,
     raster: Program,
     stencil: Program,
     square_vao: glow::VertexArray,
@@ -293,6 +329,16 @@ pub struct GpuPalette {
 pub struct GpuColormap {
     texture: glow::Texture,
     domain: [f32; 2],
+}
+
+/// A byte of flags for each of a span of feature ids, one per bit, as an
+/// R8UI texture. An id outside the span has none. [`GpuState::free`] releases
+/// it.
+pub struct GpuState {
+    texture: glow::Texture,
+    first: u32,
+    count: u32,
+    bytes: usize,
 }
 
 /// What a pick found: the layer number the embedder drew it under, and the
@@ -353,19 +399,34 @@ impl GpuColormap {
     }
 }
 
+impl GpuState {
+    /// The GPU memory it holds, to count against the tile budget.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn free(self, gl: &glow::Context) {
+        // SAFETY: deletes the state's own texture.
+        unsafe { gl.delete_texture(self.texture) }
+    }
+}
+
 impl Renderer {
     pub fn new(gl: &glow::Context) -> Result<Renderer, String> {
         let embedded = gl.version().is_embedded;
         let header = if embedded { "#version 300 es\nprecision highp float;\nprecision highp int;\n" } else { "#version 330 core\n" };
         let pick = format!("{header}#define PICK\n");
-        let fill_u = ["u_matrix", "u_post", "u_palette", "u_layer"];
-        let line_u = ["u_matrix", "u_post", "u_viewport", "u_palette", "u_points", "u_min_half", "u_layer"];
+        let state = format!("{header}#define STATE\n");
+        let fill_u = ["u_matrix", "u_post", "u_palette", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
+        let line_u = ["u_matrix", "u_post", "u_viewport", "u_palette", "u_points", "u_min_half", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
         let raster_u = ["u_matrix", "u_post", "u_band", "u_ramp", "u_kind", "u_domain", "u_opacity", "u_has_nodata", "u_nodata"];
         let renderer = Renderer {
             fill: program(gl, header, FILL_VS, FILL_FS, &fill_u)?,
             fill_pick: program(gl, &pick, FILL_VS, FILL_FS, &fill_u)?,
+            fill_state: program(gl, &state, &format!("{STATE_VS}{FILL_VS}"), FILL_FS, &fill_u)?,
             line: program(gl, header, LINE_VS, LINE_FS, &line_u)?,
             line_pick: program(gl, &pick, LINE_VS, LINE_FS, &line_u)?,
+            line_state: program(gl, &state, &format!("{STATE_VS}{LINE_VS}"), LINE_FS, &line_u)?,
             raster: program(gl, header, RASTER_VS, RASTER_FS, &raster_u)?,
             stencil: program(gl, header, STENCIL_VS, STENCIL_FS, &["u_matrix", "u_post", "u_grow"])?,
             // SAFETY: creates and fills a buffer and array of its own; the
@@ -534,6 +595,42 @@ impl Renderer {
         }
     }
 
+    /// Uploads feature flags: `flags[i]` belongs to feature id `first + i`,
+    /// each bit a state of its own. A span too long for a texture is an
+    /// error.
+    pub fn state(&self, gl: &glow::Context, first: u32, flags: &[u8]) -> Result<GpuState, String> {
+        let texels = state_texels(flags);
+        let rows = texels.len() / STATE_ROW;
+        // SAFETY: an integer query, then a texture of its own, filled from
+        // a local of `STATE_ROW * rows` single-byte texels.
+        unsafe {
+            let limit = gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) as usize;
+            if rows > limit {
+                return Err(format!("flags for {} features need {rows} rows, past the texture limit of {limit}", flags.len()));
+            }
+            let texture = texture(gl, glow::R8UI, STATE_ROW as i32, rows as i32, glow::RED_INTEGER, glow::UNSIGNED_BYTE, &texels, false)?;
+            Ok(GpuState { texture, first, count: flags.len() as u32, bytes: texels.len() })
+        }
+    }
+
+    /// Changes features' states: rewrites `gpu` from `flags`, as long as the
+    /// flags it was made with. No tile is touched.
+    pub fn update_state(&self, gl: &glow::Context, gpu: &GpuState, flags: &[u8]) -> Result<(), String> {
+        if flags.len() != gpu.count as usize {
+            return Err(format!("{} flags for a state of {} features", flags.len(), gpu.count));
+        }
+        let texels = state_texels(flags);
+        let rows = (texels.len() / STATE_ROW) as i32;
+        // SAFETY: rewrites the whole of the state's own texture, at the size
+        // it was made with, since the length is the same, from a local.
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(gpu.texture));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, STATE_ROW as i32, rows, glow::RED_INTEGER, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&texels)));
+        }
+        Ok(())
+    }
+
     pub fn colormap(&self, gl: &glow::Context, colormap: &Colormap) -> Result<GpuColormap, String> {
         let texels: Vec<u8> = colormap.entries.iter().flatten().copied().collect();
         // SAFETY: a texture of its own, filled from a local of 256 texels.
@@ -579,6 +676,13 @@ impl Renderer {
     /// lines, then points, all within the pixels the tile claims.
     pub fn draw(&self, gl: &glow::Context, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette) {
         self.draw_mesh(gl, mesh, camera, palette, Mode::Screen);
+    }
+
+    /// Draws only the features of `mesh` whose flags in `state` share a bit
+    /// with `mask`, styled by `palette`, as [`Renderer::draw`] draws: start
+    /// a layer for it and it lands over the layers before.
+    pub fn draw_state(&self, gl: &glow::Context, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette, state: &GpuState, mask: u8) {
+        self.draw_mesh(gl, mesh, camera, palette, Mode::State { texture: state.texture, first: state.first, count: state.count, mask: u32::from(mask) });
     }
 
     /// Draws a raster tile through `colormap` at `opacity`, within the
@@ -631,7 +735,19 @@ impl Renderer {
         };
         let (fill, line) = match mode {
             Mode::Screen => (&self.fill, &self.line),
+            Mode::State { .. } => (&self.fill_state, &self.line_state),
             Mode::Pick { .. } => (&self.fill_pick, &self.line_pick),
+        };
+        let state_uniforms = |gl: &glow::Context, p: &Program| {
+            if let Mode::State { first, count, mask, .. } = mode {
+                // SAFETY: sets uniforms of the program the caller bound.
+                unsafe {
+                    gl.uniform_1_i32(p.u("u_state"), 1);
+                    gl.uniform_1_u32(p.u("u_state_first"), first);
+                    gl.uniform_1_u32(p.u("u_state_count"), count);
+                    gl.uniform_1_u32(p.u("u_state_mask"), mask);
+                }
+            }
         };
         // SAFETY: binds this renderer's programs and the mesh's own arrays,
         // and draws index and instance ranges that lie inside its buffers.
@@ -640,6 +756,10 @@ impl Renderer {
             self.claim(gl, &matrix, &post, grow, square);
             gl.stencil_func(glow::EQUAL, 2, 0xff);
             gl.stencil_op(glow::KEEP, glow::KEEP, glow::KEEP);
+            if let Mode::State { texture, .. } = mode {
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            }
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(palette.texture));
 
@@ -647,6 +767,7 @@ impl Renderer {
             gl.uniform_matrix_4_f32_slice(fill.u("u_matrix"), false, &matrix);
             gl.uniform_matrix_4_f32_slice(fill.u("u_post"), false, &post);
             gl.uniform_1_i32(fill.u("u_palette"), 0);
+            state_uniforms(gl, fill);
             if let Mode::Pick { layer, .. } = mode {
                 gl.uniform_1_u32(fill.u("u_layer"), layer);
             }
@@ -658,8 +779,9 @@ impl Renderer {
             gl.uniform_matrix_4_f32_slice(line.u("u_post"), false, &post);
             gl.uniform_2_f32(line.u("u_viewport"), camera.size_px[0] as f32, camera.size_px[1] as f32);
             gl.uniform_1_i32(line.u("u_palette"), 0);
+            state_uniforms(gl, line);
             let min_half = match mode {
-                Mode::Screen => 0.0,
+                Mode::Screen | Mode::State { .. } => 0.0,
                 Mode::Pick { layer, min_half, .. } => {
                     gl.uniform_1_u32(line.u("u_layer"), layer);
                     min_half
@@ -728,7 +850,7 @@ impl Renderer {
     pub fn free(self, gl: &glow::Context) {
         // SAFETY: deletes objects this renderer created and alone refers to.
         unsafe {
-            for p in [self.fill, self.fill_pick, self.line, self.line_pick, self.raster, self.stencil] {
+            for p in [self.fill, self.fill_pick, self.fill_state, self.line, self.line_pick, self.line_state, self.raster, self.stencil] {
                 gl.delete_program(p.program);
             }
             gl.delete_vertex_array(self.square_vao);
@@ -895,6 +1017,14 @@ unsafe fn texture(gl: &glow::Context, internal: u32, w: i32, h: i32, format: u32
     }
 }
 
+/// A state texture's texels: `flags`, padded with zeros to whole rows, and
+/// at least one row.
+fn state_texels(flags: &[u8]) -> Vec<u8> {
+    let mut texels = flags.to_vec();
+    texels.resize(flags.len().div_ceil(STATE_ROW).max(1) * STATE_ROW, 0);
+    texels
+}
+
 /// The palette's texels: a row of fill colours, a row of line colours, a
 /// row of (line width, point size, 0, 0).
 fn palette_texels(palette: &Palette) -> Vec<u8> {
@@ -905,4 +1035,18 @@ fn palette_texels(palette: &Palette) -> Vec<u8> {
 
 fn f32_bytes(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_ne_bytes()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_texels_fill_whole_rows() {
+        assert_eq!(state_texels(&[]).len(), STATE_ROW);
+        assert_eq!(state_texels(&[1; STATE_ROW]).len(), STATE_ROW);
+        let texels = state_texels(&[7; STATE_ROW + 1]);
+        assert_eq!(texels.len(), 2 * STATE_ROW);
+        assert_eq!((texels[STATE_ROW], texels[STATE_ROW + 1]), (7, 0));
+    }
 }

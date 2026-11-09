@@ -266,7 +266,7 @@ transparent. =Pick { layer, feature }=, with =layer= the embedder's number.
 Rasters are not picked and do not hide features below them. Verified
 natively and in Chrome's WebGL2 on the counties.
 
-** FEATURE STATE -- decided 2026-11-09 (user decision), not built
+** FEATURE STATE -- decided 2026-11-09 (user decision), built 2026-11-09
 An embedder needs to draw chosen features differently, a selection or a
 hover, any number of them at once, the moment they are chosen. The tiles are
 already prepared and uploaded, and every vertex already carries its feature
@@ -284,9 +284,8 @@ id, so nothing about the geometry should have to change.
   against the tile budget.
 - *A state draw is an extra pass over the mesh.* The new draw takes the mesh,
   a palette, the state texture and a mask of the bits to draw, and shows only
-  the features holding one of them. The rest emit nothing: fills go outside
-  the clip volume and lines and points get no width. The vertex shaders do the
-  test, first, so a feature not drawn skips the projection and palette work,
+  the features holding one of them. The rest emit nothing: every vertex of
+  theirs goes outside the clip volume. The vertex shaders do the test, first, so a feature not drawn skips the projection and palette work,
   and the line shader already reads a texture there. Stencil claims work as in
   any draw, so a feature split across tiles blends once. The test is a shader
   variant of its own, as picking is, so a normal draw pays nothing.
@@ -315,6 +314,13 @@ time); and building a separate small mesh from the tile's source bytes (more
 memory and a second path through prepare for what the mesh already holds).
 
 Only the =gl= backend. Nothing needs a state in SVG output yet.
+
+/Implemented 2026-11-09 (=gl::GpuState=, =Renderer::state=, =update_state=,
+=draw_state=):/ the spikes' click selects a county and H gives the last one a
+hover bit. =--check-state= (C in the browser) reads back a grid of 2,500
+features per primitive for wrapped rows, span edges, ids wrapping past the top
+of the range, masks and rewritten flags. Verified natively and in Chrome's
+WebGL2. Not yet measured on a tile whose vertex work limits the frame rate.
 
 No area pick, decided 2026-11-09 (user decision). =gl::Picker= stays one
 pixel. Box or lasso selection belongs to the embedder, against its source

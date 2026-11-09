@@ -1,8 +1,10 @@
 //! The browser half of nazca's `glow` spike: the same counties and the same
 //! camera, tile selector, tile cache and `gl` backend as `../examples/spike`,
 //! in a WebGL2 canvas. Drag to pan, scroll to zoom about the cursor,
-//! right-drag to rotate about the canvas's centre, click to pick a county,
-//! and press R to cycle the raster overlay.
+//! right-drag to rotate about the canvas's centre, click to pick a county
+//! and toggle its selection, press H to toggle a hover state on the county
+//! picked last, press C to run the state check, and press R to cycle the
+//! raster overlay.
 //!
 //!   wasm-pack build --target web --release
 //!   python3 -m http.server   # then open http://localhost:8000/
@@ -21,7 +23,7 @@ use nazca::Camera;
 use nazca::gl::Renderer;
 use std::cell::RefCell;
 use std::rc::Rc;
-use tiles::TiledMap;
+use tiles::{HOVERED, SELECTED, TiledMap};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{AddEventListenerOptions, HtmlCanvasElement, KeyboardEvent, MouseEvent, WebGl2RenderingContext, WebGlContextAttributes, WheelEvent};
@@ -124,7 +126,10 @@ pub fn start() -> Result<(), JsValue> {
         let st = &mut *st;
         let px = [x * st.dpr, y * st.dpr];
         st.picked = match st.map.pick(&st.gl, &st.renderer, &st.camera, px) {
-            Some((name, id)) => format!(" · picked {name} County (feature {id})"),
+            Some((name, id)) => {
+                st.map.toggle(&st.gl, &st.renderer, id, SELECTED);
+                format!(" · picked {name} County (feature {id})")
+            }
             None => " · picked nothing".to_string(),
         };
         st.draw();
@@ -163,13 +168,23 @@ pub fn start() -> Result<(), JsValue> {
     let s = state.clone();
     on(&window, "keydown", Box::new(move |e| {
         let e: KeyboardEvent = e.unchecked_into();
-        if !e.key().eq_ignore_ascii_case("r") {
-            return;
-        }
+        let key = e.key().to_ascii_lowercase();
         let mut st = s.borrow_mut();
         let st = &mut *st;
-        let next = st.map.overlay().next();
-        st.map.set_overlay(&st.gl, &st.renderer, next);
+        match key.as_str() {
+            "r" => {
+                let next = st.map.overlay().next();
+                st.map.set_overlay(&st.gl, &st.renderer, next);
+            }
+            "h" => st.map.toggle_last(&st.gl, &st.renderer, HOVERED),
+            "c" => {
+                st.picked = match tiles::check_state(&st.gl, &st.renderer, st.camera.size_px) {
+                    Ok(report) => format!(" · {report}"),
+                    Err(e) => format!(" · state check failed: {e}"),
+                };
+            }
+            _ => return,
+        }
         st.draw();
     }))?;
     Ok(())
