@@ -37,13 +37,13 @@ Current version: 0.2.0.
 
 ## SETUP
 
-Nazca needs Rust 1.85 or later (edition 2024).
+Nazca needs Rust 1.88 or later (edition 2024).
 
 To use it as a library:
 
 ```sh
-cargo add nazca --git https://github.com/dxgeo/nazca
-cargo add nazca --git https://github.com/dxgeo/nazca --features gl,mvt,mlt
+cargo add nazca
+cargo add nazca --features gl,mvt,mlt
 ```
 
 The tests run with `cargo test --all-features`. The MLT conformance tests
@@ -96,9 +96,12 @@ Each frame, a `TileSelector` names the tiles the `Camera` needs, and a
 in for a missing tile with its cached ancestors or children. The embedder
 fetches each tile, prepares it with `MeshBuilder::for_tile`, and puts the
 mesh in the cache. The `gl` backend draws the plan over the embedder's GL
-context and picks the feature under the cursor.
+context and picks the feature under the cursor. To draw chosen features
+differently, `Renderer::state` uploads a byte of flags per feature, and
+`Renderer::draw_state` draws only those holding a bit of a mask.
 
-The native spike draws and picks the Massachusetts counties in a window:
+The native spike draws the Massachusetts counties in a window, and a click
+picks one and selects it:
 
     cargo run --features gl --example spike
     cargo run --features gl --example spike -- --screenshot out.png
@@ -180,7 +183,7 @@ do (`style::interpolate`), on MapLibre's zoom (`TileGrid::fractional_level`).
 -   **SVG fills by class.** Two features of one class that overlap fill as
     their union, where the GPU blends a translucent fill twice, and a layer's
     fills stack by class rather than in feature order.
--   **The API will change.** This is the first release.
+-   **The API will change.** Nazca is pre-1.0.
 
 Design notes are in [plans/rendering.org](plans/rendering.org), the scope in
 [project.org](project.org), and the open items in
