@@ -266,6 +266,13 @@ transparent. =Pick { layer, feature }=, with =layer= the embedder's number.
 Rasters are not picked and do not hide features below them. Verified
 natively and in Chrome's WebGL2 on the counties.
 
+/Picking through a state, implemented 2026-11-16 (=Picker::draw_state=,
+plans/state-picking.org):/ a pick can follow a feature state as a draw does,
+so a layer drawn only through a state picks only the features it shows, and
+a pick at a hidden one finds what lies beneath it. The pick programs gain a
+state variant of their own, as the screen's do, so a plain pick pays
+nothing.
+
 ** FEATURE STATE -- decided 2026-11-09 (user decision), built 2026-11-09
 An embedder needs to draw chosen features differently, a selection or a
 hover, any number of them at once, the moment they are chosen. The tiles are
@@ -313,14 +320,22 @@ tile is rebuilt per click); a single selected-id uniform (one feature at a
 time); and building a separate small mesh from the tile's source bytes (more
 memory and a second path through prepare for what the mesh already holds).
 
-Only the =gl= backend. Nothing needs a state in SVG output yet.
+Drawn only through a state, a layer shows only the features holding it,
+and hides the rest the moment the flags change: a filter, with nothing
+prepared again. Picks and SVG output follow a state too
+(plans/state-picking.org): =Picker::draw_state= picks only what a state
+draw shows, and =SvgWriter::draw_state= takes the same bytes the texture is
+built from, so a filtered layer or a highlight writes as it draws.
 
 /Implemented 2026-11-09 (=gl::GpuState=, =Renderer::state=, =update_state=,
 =draw_state=):/ the spikes' click selects a county and H gives the last one a
 hover bit. =--check-state= (C in the browser) reads back a grid of 2,500
 features per primitive for wrapped rows, span edges, ids wrapping past the top
 of the range, masks and rewritten flags. Verified natively and in Chrome's
-WebGL2.
+WebGL2. Since 2026-11-16 the check also picks every cell through the
+state over a grid of fills a layer below, and F (=--filter=) shows every
+other county by drawing and picking the layer only through a state, which
+=--svg= writes alike.
 
 /Measured 2026-11-09/ in Chrome at 2798x1604, on a layer of 266,561 lines drawn
 at zoom 4.76 under fills and points, with the GPU forced to finish: 39-43 ms a

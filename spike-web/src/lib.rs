@@ -3,8 +3,9 @@
 //! in a WebGL2 canvas. Drag to pan, scroll to zoom about the cursor,
 //! right-drag to rotate about the canvas's centre, click to pick a county
 //! and toggle its selection, press H to toggle a hover state on the county
-//! picked last, press C to run the state check, and press R to cycle the
-//! raster overlay.
+//! picked last, press F to show every other county, press S to log the view
+//! as an SVG to the console, press C to run the state check, and press R to
+//! cycle the raster overlay.
 //!
 //!   wasm-pack build --target web --release
 //!   python3 -m http.server   # then open http://localhost:8000/
@@ -177,6 +178,11 @@ pub fn start() -> Result<(), JsValue> {
                 st.map.set_overlay(&st.gl, &st.renderer, next);
             }
             "h" => st.map.toggle_last(&st.gl, &st.renderer, HOVERED),
+            "f" => {
+                let on = !st.map.filtered();
+                st.map.set_filter(&st.gl, &st.renderer, on);
+            }
+            "s" => web_sys::console::log_1(&st.map.svg(&st.camera).into()),
             "c" => {
                 st.picked = match tiles::check_state(&st.gl, &st.renderer, st.camera.size_px) {
                     Ok(report) => format!(" · {report}"),

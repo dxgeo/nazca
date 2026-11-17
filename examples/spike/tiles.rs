@@ -1,16 +1,19 @@
 //! The frame loop both spikes share: select the tiles the camera needs, plan
 //! them against the cache, prepare and upload what is missing, and draw --
 //! the counties as one layer, the chosen ones over them, an optional raster
-//! overlay as the next -- and pick the county under a pixel.
+//! overlay as the next -- and pick the county under a pixel. A filter shows
+//! every other county, by drawing and picking the layer only through a
+//! state; [`TiledMap::svg`] writes the same view through the same states.
 //!
 //! Preparing here is synchronous, so every tile a plan asks for is in the
 //! cache before the frame draws and no stand-in is ever shown. A real
 //! embedder fetches asynchronously and draws whatever the plan says now.
 
 use crate::data::{self, Counties, Overlay};
-use nazca::gl::{GpuColormap, GpuMesh, GpuPalette, GpuRaster, GpuState, Picker, Renderer};
+use nazca::gl::{GpuColormap, GpuMesh, GpuPalette, GpuRaster, GpuState, Pick, Picker, Renderer};
 use nazca::grid::TileFrame;
-use nazca::{Camera, Mesh, Palette, Plan, Style, TileCache, TileGrid, TileId, TileKey, TileSelector};
+use nazca::svg::SvgWriter;
+use nazca::{Camera, Mesh, MeshBuilder, Palette, Plan, Style, TileCache, TileGrid, TileId, TileKey, TileSelector};
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -20,6 +23,16 @@ const COUNTIES: u32 = 0;
 /// The feature-state bits the spikes use.
 pub const SELECTED: u8 = 1;
 pub const HOVERED: u8 = 2;
+/// Held by the counties the filter shows, while it is on.
+const SHOWN: u8 = 4;
+
+fn selected_style() -> Palette {
+    data::highlight([1.0, 0.55, 0.0, 0.45], [0.85, 0.3, 0.0, 1.0], 2.5)
+}
+
+fn hovered_style() -> Palette {
+    data::highlight([0.0; 4], [0.1, 0.35, 0.95, 1.0], 4.0)
+}
 
 /// A tile on the GPU and the span of county ids in it.
 struct Tile {
@@ -38,6 +51,7 @@ pub struct TiledMap {
     selected: GpuPalette,
     hovered: GpuPalette,
     last_pick: Option<u32>,
+    filtered: bool,
     needed: Vec<TileId>,
     plan: Plan,
     palette: GpuPalette,
@@ -66,9 +80,10 @@ impl TiledMap {
             grid: TileGrid::web_mercator(512, 20).unwrap(),
             cache: TileCache::new(budget),
             states: HashMap::new(),
-            selected: renderer.palette(gl, &data::highlight([1.0, 0.55, 0.0, 0.45], [0.85, 0.3, 0.0, 1.0], 2.5)).unwrap(),
-            hovered: renderer.palette(gl, &data::highlight([0.0; 4], [0.1, 0.35, 0.95, 1.0], 4.0)).unwrap(),
+            selected: renderer.palette(gl, &selected_style()).unwrap(),
+            hovered: renderer.palette(gl, &hovered_style()).unwrap(),
             last_pick: None,
+            filtered: false,
             needed: Vec::new(),
             plan: Plan::default(),
             palette: renderer.palette(gl, &data::palette()).unwrap(),
@@ -131,10 +146,14 @@ impl TiledMap {
         renderer.begin_layer(gl);
         for &id in &self.plan.draw {
             let tile = self.cache.get(TileKey { source: COUNTIES, tile: id }).unwrap();
-            renderer.draw(gl, &tile.mesh, camera, &self.palette);
             let flags = &self.flags[tile.span.clone()];
             if !self.states.contains_key(&id) && flags.iter().any(|&f| f != 0) {
                 self.states.insert(id, renderer.state(gl, tile.span.start as u32, flags).unwrap());
+            }
+            match (self.filtered, self.states.get(&id)) {
+                (false, _) => renderer.draw(gl, &tile.mesh, camera, &self.palette),
+                (true, Some(state)) => renderer.draw_state(gl, &tile.mesh, camera, &self.palette, state, SHOWN),
+                (true, None) => {}
             }
         }
         for (bit, palette) in [(SELECTED, &self.selected), (HOVERED, &self.hovered)] {
@@ -166,7 +185,11 @@ impl TiledMap {
         self.picker.begin_layer(gl);
         for &id in &self.plan.draw {
             let tile = self.cache.get(TileKey { source: COUNTIES, tile: id }).unwrap();
-            self.picker.draw(gl, renderer, &tile.mesh, camera, &self.palette, COUNTIES);
+            match (self.filtered, self.states.get(&id)) {
+                (false, _) => self.picker.draw(gl, renderer, &tile.mesh, camera, &self.palette, COUNTIES),
+                (true, Some(state)) => self.picker.draw_state(gl, renderer, &tile.mesh, camera, &self.palette, COUNTIES, state, SHOWN),
+                (true, None) => {}
+            }
         }
         let pick = self.picker.finish(gl)?;
         self.last_pick = Some(pick.feature);
@@ -183,6 +206,44 @@ impl TiledMap {
                 renderer.update_state(gl, state, &self.flags[span]).unwrap();
             }
         }
+    }
+
+    /// Shows every other county, or all of them again. Rewrites every tile's
+    /// flags; prepares and uploads nothing.
+    pub fn set_filter(&mut self, gl: &glow::Context, renderer: &Renderer, on: bool) {
+        self.filtered = on;
+        for (i, f) in self.flags.iter_mut().enumerate() {
+            *f = if on && i % 2 == 0 { *f | SHOWN } else { *f & !SHOWN };
+        }
+        for (&id, state) in &self.states {
+            let span = self.cache.get(TileKey { source: COUNTIES, tile: id }).unwrap().span.clone();
+            renderer.update_state(gl, state, &self.flags[span]).unwrap();
+        }
+    }
+
+    pub fn filtered(&self) -> bool {
+        self.filtered
+    }
+
+    /// `camera`'s view as an SVG, the layers as [`TiledMap::draw`] draws
+    /// them but for the raster: the counties prepared again as one view,
+    /// written through the same flags.
+    pub fn svg(&self, camera: &Camera) -> String {
+        let mut builder = MeshBuilder::for_view(camera);
+        self.counties.prepare_into(&mut builder, camera.visible_bounds());
+        let mesh = builder.finish();
+        let mut svg = SvgWriter::new(camera.size_px, Some(data::BACKGROUND));
+        svg.begin_layer();
+        if self.filtered {
+            svg.draw_state(&mesh, camera, &data::palette(), 0, &self.flags, SHOWN);
+        } else {
+            svg.draw(&mesh, camera, &data::palette());
+        }
+        for (bit, palette) in [(SELECTED, selected_style()), (HOVERED, hovered_style())] {
+            svg.begin_layer();
+            svg.draw_state(&mesh, camera, &palette, 0, &self.flags, bit);
+        }
+        svg.finish()
     }
 
     /// Flips state `bit` of the county picked last, if any.
@@ -245,7 +306,9 @@ fn cell_centre(n: u32) -> [f32; 2] {
 /// Checks what the counties are too few to reach, by drawing `GRID` x `GRID`
 /// features of each primitive and reading the framebuffer: the flags' wrap
 /// onto rows, the edges of a span, ids wrapping past the top of the range,
-/// masks over several bits, and rewriting flags.
+/// masks over several bits, and rewriting flags. Then picks every cell
+/// through the state, over a grid of fills a layer below: a cell picks its
+/// own feature where it holds the bit and the fill beneath where it doesn't.
 pub fn check_state(gl: &glow::Context, renderer: &Renderer, size: [u32; 2]) -> Result<String, String> {
     use glow::HasContext;
     let count = (GRID * GRID) as usize;
@@ -256,7 +319,11 @@ pub fn check_state(gl: &glow::Context, renderer: &Renderer, size: [u32; 2]) -> R
     let pattern = |n: usize| u8::from(n.is_multiple_of(7)) | u8::from(n.is_multiple_of(11)) << 1;
     let flags: Vec<u8> = (0..count).map(pattern).collect();
     let inverted: Vec<u8> = flags.iter().map(|f| f ^ 3).collect();
+    const BELOW: u32 = 1 << 20;
+    let below = renderer.upload(gl, &grid_mesh(Kind::Fill, BELOW))?;
+    let mut picker = Picker::new(gl)?;
     let mut checked = 0;
+    let mut picked = 0;
     for kind in [Kind::Fill, Kind::Line, Kind::Point] {
         for base in [0, u32::MAX - 1000] {
             let mesh = renderer.upload(gl, &grid_mesh(kind, base))?;
@@ -290,11 +357,35 @@ pub fn check_state(gl: &glow::Context, renderer: &Renderer, size: [u32; 2]) -> R
             verify("span edges", &part, 1, &|n| (1500..1700).contains(&n))?;
             renderer.update_state(gl, &whole, &inverted)?;
             verify("rewritten", &whole, 1, &|n| pattern(n) & 1 == 0)?;
+            let mut verify_pick = |name: &str, state: &GpuState, mask: u8, expect: &dyn Fn(usize) -> bool| -> Result<(), String> {
+                let half = size[0].min(size[1]) as f64 / 2.0;
+                for n in 0..count {
+                    let [x, y] = cell_centre(n as u32);
+                    let px = [size[0] as f64 / 2.0 + x as f64 * half, size[1] as f64 / 2.0 - y as f64 * half];
+                    picker.begin(gl, &camera, px, 0.0);
+                    picker.begin_layer(gl);
+                    picker.draw(gl, renderer, &below, &camera, &palette, 0);
+                    picker.begin_layer(gl);
+                    picker.draw_state(gl, renderer, &mesh, &camera, &palette, 1, state, mask);
+                    let got = picker.finish(gl);
+                    let want = if expect(n) { Pick { layer: 1, feature: base.wrapping_add(n as u32) } } else { Pick { layer: 0, feature: BELOW + n as u32 } };
+                    if got != Some(want) {
+                        return Err(format!("{kind:?}, base {base}, pick {name}: feature {n} picked {got:?}, wanted {want:?}"));
+                    }
+                }
+                picked += count;
+                Ok(())
+            };
+            verify_pick("rewritten", &whole, 1, &|n| pattern(n) & 1 == 0)?;
+            verify_pick("both bits", &whole, 3, &|n| pattern(n) != 3)?;
+            verify_pick("span edges", &part, 1, &|n| (1500..1700).contains(&n))?;
             whole.free(gl);
             part.free(gl);
             mesh.free(gl);
         }
     }
+    below.free(gl);
+    picker.free(gl);
     palette.free(gl);
-    Ok(format!("state check passed: {checked} features read back"))
+    Ok(format!("state check passed: {checked} features read back, {picked} picked"))
 }

@@ -7,3 +7,6 @@ Design notes, one self-contained plan per file, ordered by dependency.
 - [[file:rendering.org][rendering.org]] -- the rendering pipeline: input,
   tile grids, prepare, tile cache, raster, styling, hit-testing, camera,
   backends, globe, v1 features and the v1 slice (2026-10-29).
+- [[file:state-picking.org][state-picking.org]] -- picking and SVG through
+  feature state, so a layer drawn only through a state picks and exports what
+  is on screen (2026-11-16, built in 0.2.1).

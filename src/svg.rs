@@ -31,6 +31,14 @@
 //! over the overlap; and a layer's fills are stacked by class rather than in
 //! feature order.
 //!
+//! *Feature state* works as on the GPU: [`SvgWriter::draw_state`] writes only
+//! the features whose flags share a bit with a mask, taking the same bytes
+//! [`crate::gl::Renderer::state`] does. So a layer drawn only through a state
+//! writes only what the screen shows, and a state pass, such as a highlight
+//! in a layer of its own, writes over the layer as it draws on screen. A
+//! feature is written whole or not at all: each of its primitives carries its
+//! id.
+//!
 //! Styles are written once each, as CSS classes. Rasters are not written: an
 //! SVG image needs encoded image bytes, which is the `raster` backend's
 //! business.
@@ -94,6 +102,23 @@ impl SvgWriter {
     /// Draws `mesh` where `camera` puts it, styled by `palette`, into the
     /// current layer's paths (see the module docs).
     pub fn draw(&mut self, mesh: &Mesh, camera: &Camera, palette: &Palette) {
+        self.draw_shown(mesh, camera, palette, |_| true);
+    }
+
+    /// Draws only the features of `mesh` whose byte in `flags` shares a bit
+    /// with `mask`, as [`SvgWriter::draw`] draws. `flags` holds the features
+    /// with ids from `first` on, wrapping past the top of the range, as
+    /// [`crate::gl::Renderer::state`] takes them; a feature outside the span
+    /// holds no state.
+    pub fn draw_state(&mut self, mesh: &Mesh, camera: &Camera, palette: &Palette, first: u32, flags: &[u8], mask: u8) {
+        self.draw_shown(mesh, camera, palette, |id| flags.get(id.wrapping_sub(first) as usize).is_some_and(|f| f & mask != 0));
+    }
+
+    /// Draws the features of `mesh` for whose id `shown` holds: a polygon by
+    /// its first ring's first vertex, a segment by its first, a point by its
+    /// own.
+    fn draw_shown(&mut self, mesh: &Mesh, camera: &Camera, palette: &Palette, shown: impl Fn(u32) -> bool) {
+        let shown = |i: u32| shown(mesh.ids[i as usize]);
         let screen = |i: u32| {
             let v = &mesh.vertices[i as usize * 3..i as usize * 3 + 2];
             camera.map_to_screen(mesh.frame.to_map([v[0], v[1]]))
@@ -105,6 +130,9 @@ impl SvgWriter {
         for p in &mesh.polygons {
             let rings = &mesh.rings[p[0] as usize..p[1] as usize];
             let Some(first) = rings.first() else { continue };
+            if !shown(first[0]) {
+                continue;
+            }
             let class = class_of(first[0]);
             let style = palette.get(class);
             if style.fill[3] <= 0.0 {
@@ -144,7 +172,7 @@ impl SvgWriter {
             let (a, b) = (s[0], s[1]);
             let class = class_of(a);
             let style = palette.get(class);
-            if style.line_width <= 0.0 || style.line[3] <= 0.0 {
+            if style.line_width <= 0.0 || style.line[3] <= 0.0 || !shown(a) {
                 continue;
             }
             lines.entry(class).or_default();
@@ -173,7 +201,7 @@ impl SvgWriter {
         for &i in &mesh.points {
             let class = class_of(i);
             let style = palette.get(class);
-            if style.point_size <= 0.0 || style.fill[3] <= 0.0 {
+            if style.point_size <= 0.0 || style.fill[3] <= 0.0 || !shown(i) {
                 continue;
             }
             let [x, y] = screen(i);
@@ -333,6 +361,85 @@ mod tests {
         // Layer 1 is written whole before layer 2 starts.
         let (l1, f2) = (out.find(r#"class="l1-1""#).unwrap(), out.find(r#"class="f2-1""#).unwrap());
         assert!(l1 < f2, "{out}");
+    }
+
+    /// A polygon with a hole as feature 10, a line as 11 and a point as 12.
+    fn three_features(cam: &Camera) -> Mesh {
+        let mut b = MeshBuilder::for_view(cam);
+        b.set_class(1);
+        b.set_feature(10);
+        b.begin_polygon();
+        for r in [[[10.0, 10.0], [90.0, 10.0], [90.0, 90.0], [10.0, 90.0], [10.0, 10.0]], [[40.0, 40.0], [40.0, 60.0], [60.0, 60.0], [60.0, 40.0], [40.0, 40.0]]] {
+            b.begin_ring();
+            b.points(&r);
+            b.end_ring();
+        }
+        b.end_polygon();
+        b.set_feature(11);
+        b.begin_line();
+        b.points(&[[120.0, 20.0], [180.0, 20.0], [180.0, 80.0]]);
+        b.end_line();
+        b.set_feature(12);
+        b.point([150.0, 50.0]);
+        b.finish()
+    }
+
+    fn write_state(mesh: &Mesh, cam: &Camera, first: u32, flags: &[u8], mask: u8) -> String {
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.begin_layer();
+        svg.draw_state(mesh, cam, &palette(), first, flags, mask);
+        svg.finish()
+    }
+
+    #[test]
+    fn a_state_writes_only_the_features_holding_it() {
+        let cam = camera();
+        let mesh = three_features(&cam);
+        // The polygon and the point hold bit 0; the line holds only bit 1.
+        let out = write_state(&mesh, &cam, 10, &[1, 2, 1], 1);
+        assert!(out.contains(r#"<path class="f1-1" d="M10,10 90,10 90,90 10,90ZM60,60 60,40 40,40 40,60Z"/>"#), "{out}");
+        // The polygon's outlines are its own; the line's are gone.
+        assert!(out.contains(r#"<path class="l1-1" d="M10,90 90,90 90,10 10,10 10,90ZM40,60 40,40 60,40 60,60 40,60Z"/>"#), "{out}");
+        assert!(!out.contains("M120,80"), "{out}");
+        assert!(out.contains(r#"<circle class="p1-1""#), "{out}");
+        // Only the line.
+        let out = write_state(&mesh, &cam, 10, &[1, 2, 1], 2);
+        assert!(!out.contains("f1-1") && !out.contains("<circle"), "{out}");
+        assert!(out.contains(r#"<path class="l1-1" d="M120,80 180,80 180,20"/>"#), "{out}");
+    }
+
+    #[test]
+    fn a_state_holding_nothing_writes_an_empty_layer() {
+        let cam = camera();
+        let mesh = three_features(&cam);
+        let empty = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"100\" viewBox=\"0 0 200 100\">\n</svg>\n";
+        assert_eq!(write_state(&mesh, &cam, 10, &[0, 0, 0], 3), empty);
+        assert_eq!(write_state(&mesh, &cam, 10, &[1, 1, 1], 2), empty);
+        // A span that misses every feature, and one that wraps past the top
+        // of the range to end just short of them.
+        assert_eq!(write_state(&mesh, &cam, 13, &[1; 4], 1), empty);
+        assert_eq!(write_state(&mesh, &cam, u32::MAX - 5, &[1; 16], 1), empty);
+    }
+
+    #[test]
+    fn a_span_wrapping_past_the_top_holds_its_features() {
+        let cam = camera();
+        let mesh = three_features(&cam);
+        let mut flags = [0u8; 20];
+        flags[6 + 11] = 1; // id 11 from u32::MAX - 5
+        let out = write_state(&mesh, &cam, u32::MAX - 5, &flags, 1);
+        assert!(out.contains(r#"<path class="l1-1" d="M120,80 180,80 180,20"/>"#), "{out}");
+        assert!(!out.contains("f1-1") && !out.contains("<circle"), "{out}");
+    }
+
+    #[test]
+    fn every_flag_set_writes_what_draw_does() {
+        let cam = camera();
+        let mesh = three_features(&cam);
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.begin_layer();
+        svg.draw(&mesh, &cam, &palette());
+        assert_eq!(write_state(&mesh, &cam, 10, &[1, 1, 1], 1), svg.finish());
     }
 
     #[test]

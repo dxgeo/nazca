@@ -16,7 +16,9 @@
 //!   framebuffer and reads it back ([`Picker`]).
 //! - *Feature state* draws a mesh again showing only the features whose
 //!   flags a small texture marks ([`Renderer::draw_state`]), so choosing a
-//!   feature rewrites one texture and touches no geometry.
+//!   feature rewrites one texture and touches no geometry. A pick can follow
+//!   the same state ([`Picker::draw_state`]), so a layer drawn only through
+//!   a state picks only what it shows.
 //!
 //! *Each pixel belongs to one tile.* Tiles overlap -- each keeps a guard
 //! band past its edge, and an ancestor standing in for a missing tile
@@ -260,19 +262,42 @@ impl Program {
 }
 
 /// Whether a draw goes to the screen, to the screen for the features holding
-/// a state, or to the picker.
+/// a state, or to the picker, for every feature or those holding a state.
 #[derive(Clone, Copy)]
 enum Mode {
     Screen,
-    State { texture: glow::Texture, first: u32, count: u32, mask: u32 },
-    Pick { post: [f32; 16], layer: u32, min_half: f32 },
+    State(StateTest),
+    Pick { post: [f32; 16], layer: u32, min_half: f32, state: Option<StateTest> },
+}
+
+/// A [`GpuState`] and the mask a draw tests its flags against.
+#[derive(Clone, Copy)]
+struct StateTest {
+    texture: glow::Texture,
+    first: u32,
+    count: u32,
+    mask: u32,
+}
+
+impl StateTest {
+    fn new(state: &GpuState, mask: u8) -> StateTest {
+        StateTest { texture: state.texture, first: state.first, count: state.count, mask: u32::from(mask) }
+    }
 }
 
 impl Mode {
     fn post(&self) -> [f32; 16] {
         match self {
-            Mode::Screen | Mode::State { .. } => IDENTITY,
+            Mode::Screen | Mode::State(_) => IDENTITY,
             Mode::Pick { post, .. } => *post,
+        }
+    }
+
+    fn state(&self) -> Option<StateTest> {
+        match *self {
+            Mode::Screen => None,
+            Mode::State(state) => Some(state),
+            Mode::Pick { state, .. } => state,
         }
     }
 }
@@ -283,9 +308,11 @@ pub struct Renderer {
     fill: Program,
     fill_pick: Program,
     fill_state: Program,
+    fill_pick_state: Program,
     line: Program,
     line_pick: Program,
     line_state: Program,
+    line_pick_state: Program,
     raster: Program,
     stencil: Program,
     square_vao: glow::VertexArray,
@@ -417,6 +444,7 @@ impl Renderer {
         let header = if embedded { "#version 300 es\nprecision highp float;\nprecision highp int;\n" } else { "#version 330 core\n" };
         let pick = format!("{header}#define PICK\n");
         let state = format!("{header}#define STATE\n");
+        let pick_state = format!("{header}#define PICK\n#define STATE\n");
         let fill_u = ["u_matrix", "u_post", "u_palette", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
         let line_u = ["u_matrix", "u_post", "u_viewport", "u_palette", "u_points", "u_min_half", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
         let raster_u = ["u_matrix", "u_post", "u_band", "u_ramp", "u_kind", "u_domain", "u_opacity", "u_has_nodata", "u_nodata"];
@@ -424,9 +452,11 @@ impl Renderer {
             fill: program(gl, header, FILL_VS, FILL_FS, &fill_u)?,
             fill_pick: program(gl, &pick, FILL_VS, FILL_FS, &fill_u)?,
             fill_state: program(gl, &state, &format!("{STATE_VS}{FILL_VS}"), FILL_FS, &fill_u)?,
+            fill_pick_state: program(gl, &pick_state, &format!("{STATE_VS}{FILL_VS}"), FILL_FS, &fill_u)?,
             line: program(gl, header, LINE_VS, LINE_FS, &line_u)?,
             line_pick: program(gl, &pick, LINE_VS, LINE_FS, &line_u)?,
             line_state: program(gl, &state, &format!("{STATE_VS}{LINE_VS}"), LINE_FS, &line_u)?,
+            line_pick_state: program(gl, &pick_state, &format!("{STATE_VS}{LINE_VS}"), LINE_FS, &line_u)?,
             raster: program(gl, header, RASTER_VS, RASTER_FS, &raster_u)?,
             stencil: program(gl, header, STENCIL_VS, STENCIL_FS, &["u_matrix", "u_post", "u_grow"])?,
             // SAFETY: creates and fills a buffer and array of its own; the
@@ -682,7 +712,7 @@ impl Renderer {
     /// with `mask`, styled by `palette`, as [`Renderer::draw`] draws: start
     /// a layer for it and it lands over the layers before.
     pub fn draw_state(&self, gl: &glow::Context, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette, state: &GpuState, mask: u8) {
-        self.draw_mesh(gl, mesh, camera, palette, Mode::State { texture: state.texture, first: state.first, count: state.count, mask: u32::from(mask) });
+        self.draw_mesh(gl, mesh, camera, palette, Mode::State(StateTest::new(state, mask)));
     }
 
     /// Draws a raster tile through `colormap` at `opacity`, within the
@@ -733,13 +763,15 @@ impl Renderer {
             // SAFETY: draws the four vertices of the renderer's own square.
             unsafe { gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4) }
         };
+        let state = mode.state();
         let (fill, line) = match mode {
             Mode::Screen => (&self.fill, &self.line),
-            Mode::State { .. } => (&self.fill_state, &self.line_state),
-            Mode::Pick { .. } => (&self.fill_pick, &self.line_pick),
+            Mode::State(_) => (&self.fill_state, &self.line_state),
+            Mode::Pick { state: None, .. } => (&self.fill_pick, &self.line_pick),
+            Mode::Pick { state: Some(_), .. } => (&self.fill_pick_state, &self.line_pick_state),
         };
         let state_uniforms = |gl: &glow::Context, p: &Program| {
-            if let Mode::State { first, count, mask, .. } = mode {
+            if let Some(StateTest { first, count, mask, .. }) = state {
                 // SAFETY: sets uniforms of the program the caller bound.
                 unsafe {
                     gl.uniform_1_i32(p.u("u_state"), 1);
@@ -756,9 +788,9 @@ impl Renderer {
             self.claim(gl, &matrix, &post, grow, square);
             gl.stencil_func(glow::EQUAL, 2, 0xff);
             gl.stencil_op(glow::KEEP, glow::KEEP, glow::KEEP);
-            if let Mode::State { texture, .. } = mode {
+            if let Some(state) = state {
                 gl.active_texture(glow::TEXTURE1);
-                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                gl.bind_texture(glow::TEXTURE_2D, Some(state.texture));
             }
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(palette.texture));
@@ -781,7 +813,7 @@ impl Renderer {
             gl.uniform_1_i32(line.u("u_palette"), 0);
             state_uniforms(gl, line);
             let min_half = match mode {
-                Mode::Screen | Mode::State { .. } => 0.0,
+                Mode::Screen | Mode::State(_) => 0.0,
                 Mode::Pick { layer, min_half, .. } => {
                     gl.uniform_1_u32(line.u("u_layer"), layer);
                     min_half
@@ -850,7 +882,7 @@ impl Renderer {
     pub fn free(self, gl: &glow::Context) {
         // SAFETY: deletes objects this renderer created and alone refers to.
         unsafe {
-            for p in [self.fill, self.fill_pick, self.fill_state, self.line, self.line_pick, self.line_state, self.raster, self.stencil] {
+            for p in [self.fill, self.fill_pick, self.fill_state, self.fill_pick_state, self.line, self.line_pick, self.line_state, self.line_pick_state, self.raster, self.stencil] {
                 gl.delete_program(p.program);
             }
             gl.delete_vertex_array(self.square_vao);
@@ -937,7 +969,18 @@ impl Picker {
     /// Draws `mesh` for picking, as `layer`. Call in the order the screen
     /// draws.
     pub fn draw(&self, gl: &glow::Context, renderer: &Renderer, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette, layer: u32) {
-        renderer.draw_mesh(gl, mesh, camera, palette, Mode::Pick { post: self.post, layer, min_half: self.min_half });
+        renderer.draw_mesh(gl, mesh, camera, palette, Mode::Pick { post: self.post, layer, min_half: self.min_half, state: None });
+    }
+
+    /// Draws for picking only the features of `mesh` whose flags in `state`
+    /// share a bit with `mask`, as [`Renderer::draw_state`] draws them. The
+    /// rest pick nothing, so what lies beneath them is picked instead: given
+    /// the state and mask the screen drew a layer with, a pick sees exactly
+    /// what is on screen.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_state(&self, gl: &glow::Context, renderer: &Renderer, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette, layer: u32, state: &GpuState, mask: u8) {
+        let state = Some(StateTest::new(state, mask));
+        renderer.draw_mesh(gl, mesh, camera, palette, Mode::Pick { post: self.post, layer, min_half: self.min_half, state });
     }
 
     /// Reads the pixel back and rebinds the default framebuffer. `None` if

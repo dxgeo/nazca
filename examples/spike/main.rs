@@ -4,7 +4,8 @@
 //! window over an OpenGL 3.3 core context. Drag to pan, scroll to zoom about
 //! the cursor, right-drag to rotate about the window's centre, click to pick
 //! a county and toggle its selection, press H to toggle a hover state on the
-//! county picked last, and press R to cycle the raster overlay.
+//! county picked last, press F to show every other county, and press R to
+//! cycle the raster overlay.
 //!
 //!   cargo run -p nazca --features gl --example spike
 //!   cargo run -p nazca --features gl --example spike -- --screenshot out.png
@@ -16,8 +17,10 @@
 //! picks at that window pixel after the first frame and prints the county.
 //! `--zoom F` opens zoomed in F times about the window's centre. `--select
 //! X,Y` and `--hover X,Y` (each repeatable) give the county at that pixel a
-//! state after the first frame. `--check-state` reads back a synthetic grid
-//! of features drawn by state, reports and exits.
+//! state after the first frame. `--filter` opens showing every other county,
+//! as F toggles. `--svg out.svg` writes the first frame as an SVG, through
+//! the same states, and exits. `--check-state` reads back and picks a
+//! synthetic grid of features drawn by state, reports and exits.
 
 mod data;
 mod tiles;
@@ -58,6 +61,8 @@ struct Options {
     /// Pixels whose counties get a state after the first frame.
     states: Vec<([f64; 2], u8)>,
     check_state: bool,
+    filter: bool,
+    svg: Option<String>,
     zoom: f64,
 }
 
@@ -85,6 +90,10 @@ impl App {
             }
             std::process::exit(0);
         }
+        if self.options.filter {
+            self.options.filter = false;
+            g.map.set_filter(&g.gl, &g.renderer, true);
+        }
         let stats = g.map.draw(&g.gl, &g.renderer, camera);
         if stats.prepared > 0 {
             println!(
@@ -104,6 +113,13 @@ impl App {
             report(pick, px);
             if let Some((_, id)) = pick {
                 g.map.toggle(&g.gl, &g.renderer, id, bit);
+            }
+        }
+        if let Some(path) = self.options.svg.take() {
+            std::fs::write(&path, g.map.svg(camera)).unwrap();
+            println!("wrote {path}");
+            if self.options.screenshot.is_none() {
+                std::process::exit(0);
             }
         }
         if let Some(path) = self.options.screenshot.take() {
@@ -235,6 +251,11 @@ impl ApplicationHandler for App {
                     println!("overlay: {next:?}");
                 }
                 Key::Character(c) if c.eq_ignore_ascii_case("h") => g.map.toggle_last(&g.gl, &g.renderer, HOVERED),
+                Key::Character(c) if c.eq_ignore_ascii_case("f") => {
+                    let on = !g.map.filtered();
+                    g.map.set_filter(&g.gl, &g.renderer, on);
+                    println!("filter: {}", if on { "every other county" } else { "off" });
+                }
                 Key::Named(NamedKey::Escape) => event_loop.exit(),
                 _ => return,
             },
@@ -252,10 +273,10 @@ impl ApplicationHandler for App {
 
 fn main() {
     let usage = || -> ! {
-        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--check-state]");
+        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state]");
         std::process::exit(2);
     };
-    let mut options = Options { screenshot: None, bearing: 0.0, overlay: Overlay::None, pick: None, states: Vec::new(), check_state: false, zoom: 1.0 };
+    let mut options = Options { screenshot: None, bearing: 0.0, overlay: Overlay::None, pick: None, states: Vec::new(), check_state: false, filter: false, svg: None, zoom: 1.0 };
     let mut args = std::env::args().skip(1);
     let point = |value: &str| -> [f64; 2] {
         let xy: Vec<f64> = value.split(',').map(|v| v.parse().unwrap_or_else(|_| usage())).collect();
@@ -267,9 +288,14 @@ fn main() {
             options.check_state = true;
             continue;
         }
+        if flag == "--filter" {
+            options.filter = true;
+            continue;
+        }
         let value = args.next().unwrap_or_else(|| usage());
         match flag.as_str() {
             "--screenshot" => options.screenshot = Some(value),
+            "--svg" => options.svg = Some(value),
             "--bearing" => options.bearing = value.parse().unwrap_or_else(|_| usage()),
             "--zoom" => options.zoom = value.parse().unwrap_or_else(|_| usage()),
             "--raster" => {

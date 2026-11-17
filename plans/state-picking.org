@@ -1,0 +1,167 @@
+#+TITLE: Plan: Picking and SVG Through Feature State
+#+AUTHOR: Daniel Okuniewicz Jr.
+#+DATE: {{{time(%Y-%m-%d)}}}
+
+* Picking and SVG Through Feature State
+
+** STATUS -- decided 2026-11-16 (user decision), built 2026-11-16
+Both steps are built, as below, and released in 0.2.1. Both are additions to
+the public API; nothing existing changes meaning. § DECISIONS records the
+answers to what was open.
+
+** THE PROBLEM
+Feature state (plans/rendering.org § FEATURE STATE) was built to draw chosen
+features again, over a layer that already drew them all: a selection, a
+hover. It works just as well the other way round. An embedder that draws a
+layer /only/ through =Renderer::draw_state=, with a bit that marks the
+features to show, has a layer that hides the rest, the moment the flags
+change, with no geometry prepared again and nothing fetched. That is what a
+filter on a map wants.
+
+Two parts of nazca don't follow it:
+
+- *The picker sees every feature.* =Picker::draw= draws the whole mesh, so a
+  feature the screen hides still takes the pick at its pixels. The embedder
+  can throw that pick away, but can't see past it: a shown feature under a
+  hidden one of the same layer, which is on screen and looks clickable, can't
+  be picked at all. Hover has the same fault.
+- *SVG output has no state.* =SvgWriter::draw= writes the whole mesh, and
+  plans/rendering.org says "Nothing needs a state in SVG output yet". An
+  embedder whose screen hides features has to prepare its meshes again from
+  the source bytes, leaving those features out, to make an SVG of what is on
+  screen. It also can't write a state pass, such as a highlight, into SVG.
+
+** WHAT EXISTS
+Measured against =src/gl.rs= and =src/svg.rs= at 0.2.0:
+
+- =Renderer::draw_mesh= takes a private =Mode=: =Screen=, =State { texture,
+  first, count, mask }= or =Pick { post, layer, min_half }=. Each picks a pair
+  of programs. The three pairs are compiled in =Renderer::new= from the same
+  sources under =#define PICK= or =#define STATE=, the state pair with
+  =STATE_VS= prepended.
+- =STATE_VS= is only the =has_state= test. In =FILL_VS= and =LINE_VS= it runs
+  first and sends a feature not drawn outside the clip volume. =PICK= changes
+  only the fragment shaders and the line width's minimum, so the two defines
+  don't touch the same lines.
+- Both programs of each pair already list every uniform of both modes
+  (=fill_u=, =line_u=), and the line program reads the palette on texture
+  unit 0 in every mode. A state draw binds its texture on unit 1.
+- Stencil claims run the same in every mode, so a pick sees the tile that
+  wins each pixel on screen.
+- =Mesh::ids= holds each vertex's feature id. =SvgWriter::draw= walks
+  =polygons= (each to its =rings=), =outlines= (pairs of vertex indices) and
+  =points=, so every primitive it writes has a vertex whose id says which
+  feature it belongs to.
+
+** DESIGN
+
+*** Step 1 -- picking through a state
+- *=Picker::draw_state(gl, renderer, mesh, camera, palette, layer, state,
+  mask)=*, beside =Picker::draw=, as =Renderer::draw_state= is beside
+  =Renderer::draw=. It picks only the features holding a bit of =mask= in
+  =state=. The rest emit nothing, so what lies under them in the same layer,
+  or in a layer drawn before, is picked instead. Called with the state and
+  mask the screen drew the layer with, a pick sees exactly what is on screen.
+- *=Mode= gets a fourth case*, =PickState { post, layer, min_half, texture,
+  first, count, mask }=, or =Pick= takes an optional state. The second is
+  less code; the choice is internal either way.
+- *Two more programs*, =fill_pick_state= and =line_pick_state=: the shared
+  sources under both defines, with =STATE_VS= prepended. Nothing in the
+  shaders changes. =Renderer::new= compiles eight vertex programs where it
+  compiled six, and =Renderer::free= frees them.
+- *=draw_mesh=* binds the state texture on unit 1 and sets the state
+  uniforms for the new mode too, so the state branch is taken when a state is
+  present rather than for =State= only.
+- *Nothing else changes.* The pick framebuffer, its one pixel, the
+  tolerance and the read-back are the same. A plain =Picker::draw= costs
+  what it did.
+
+Ruled out:
+- *Discarding a hidden pick on the CPU*, which embedders can do today. It
+  can't see the feature beneath, which is the problem.
+- *Picking every feature under the pixel* (peeling, one pass per hit), to
+  filter afterwards. Several read-backs a pick, and still the embedder's
+  filter to run.
+- *Meshes prepared without the hidden features.* The whole tile is prepared
+  and uploaded again on every change, which is what feature state exists to
+  avoid.
+
+*** Step 2 -- SVG through a state
+- *=SvgWriter::draw_state(mesh, camera, palette, first, flags, mask)=*,
+  beside =SvgWriter::draw=: writes only the features whose byte in =flags=
+  (for ids from =first=, as =Renderer::state= takes them) holds a bit of
+  =mask=. A feature outside the span holds no state, as on the GPU.
+- *Which feature a primitive is*: a polygon by its first ring's first
+  vertex, an outline segment by its first vertex, a point by its vertex, all
+  through =Mesh::ids=. A feature's primitives all carry its id, so a feature
+  is written whole or not at all.
+- *The flags are the embedder's own bytes.* It keeps them to rewrite the
+  GPU texture anyway, so the SVG takes the same slice. No GPU object is
+  involved and the writer stays standard-library only.
+- *It serves both uses*: drawing only the shown features of a layer, and a
+  state pass such as a highlight written over the layer, as on screen. This
+  replaces "Nothing needs a state in SVG output yet" in plans/rendering.org.
+- *=draw= becomes =draw_state= with no filter*, one walk of the mesh with a
+  per-feature test that is always true, so the two can't drift apart.
+
+Ruled out: a closure =Fn(u32) -> bool= in place of the flags. It is more
+general, but it would make SVG take a different shape of state from the GPU,
+and the embedder already has the bytes.
+
+** STEPS
+1. *Picking through a state.* =Mode=, the two programs, =draw_mesh=,
+   =Picker::draw_state=. Docs: =gl.rs='s module docs (Picking, Feature
+   state), plans/rendering.org § HIT-TESTING and § FEATURE STATE.
+2. *SVG through a state.* =SvgWriter::draw_state=, =draw= through it. Docs:
+   =svg.rs='s module docs, plans/rendering.org § FEATURE STATE.
+3. *The README*: one sentence under "An interactive map", that a pick and an
+   SVG can follow a state as the screen does.
+4. *A release*, versioned as § OPEN QUESTIONS settles.
+
+** CHECKS
+- *Picking*: extend the spike's =--check-state= (C in the browser). Over its
+  grid of 2,500 features per primitive, draw a second grid underneath, give
+  the top grid alternating flags, and pick every cell through the state:
+  each cell picks the top feature where it holds the bit and the bottom one
+  where it doesn't, for fills, lines and points, across wrapped rows, span
+  edges and ids wrapping past the top of the range. Natively and in Chrome's
+  WebGL2, as the state check was.
+- *A pick with no state* still returns what it did: the existing pick checks
+  pass unchanged.
+- *SVG*: unit tests in =svg.rs=. A mesh of a polygon with a hole, a line and
+  a point as three features: with flags showing two, the document holds
+  exactly those two; with none, nothing but the empty layer; =draw= and
+  =draw_state= with every flag set write identical documents.
+- *The spike*: a key (and flag) that hides every other county through a
+  state and draws the layer only through it, so a click on a hidden county
+  picks what lies under it, and the screenshot and SVG agree.
+- *Cost*: a pick through a state against a plain pick on the 266,561-line
+  layer used for the state measurement (plans/rendering.org § FEATURE STATE).
+  Expected the same: the test is the one a state draw already pays.
+
+** DECISIONS -- 2026-11-16 (user decision)
+1. *Version: 0.2.1.* Both steps only add public functions.
+2. *=Pick= takes an optional state*, rather than =Mode= gaining a fourth
+   case. A private =StateTest= holds the texture, span and mask, and
+   =Mode::State= carries one too, so =draw_mesh= binds and sets a state
+   wherever one is present.
+3. *One mask per SVG call*, as on the GPU, where a highlight is a second
+   pass.
+
+** RESULTS -- 2026-11-16
+- *Picking*: =--check-state= (C in the browser) now picks all 2,500 cells
+  of each primitive grid, at both id bases, through three states (a
+  rewritten bit, both bits, span edges) over a grid of fills a layer below:
+  45,000 picks, each the top feature where it holds the bit and the fill
+  beneath where it doesn't. Passed natively (OpenGL 4.1 on Metal) and in
+  Chrome's WebGL2. The existing pick checks pass unchanged.
+- *SVG*: unit tests in =svg.rs= cover the three features, the empty layer,
+  spans that miss or wrap past the top of the range, and =draw= against
+  =draw_state= with every flag set.
+- *The spike*: F (=--filter=) shows every other county. A click on a hidden
+  one (Worcester) picks nothing; a shown one (Middlesex) picks as before.
+  =--filter --svg= and =--screenshot= of the same view show the same
+  counties.
+- *Cost*: not measured. The 266,561-line layer of the state measurement is
+  not in this repo. The test a pick through a state runs is the one a state
+  draw runs, at one pixel.
