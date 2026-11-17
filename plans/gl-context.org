@@ -1,0 +1,155 @@
+#+TITLE: Plan: The GL Context
+#+AUTHOR: Daniel Okuniewicz Jr.
+#+DATE: {{{time(%Y-%m-%d)}}}
+
+* The GL Context
+
+** STATUS -- proposal, written 2026-11-10, checked against 0.2.1 2026-11-17
+Nothing here is decided. Step 1 is the recommendation; step 2 is written
+down so that, if it is ever wanted, step 1 has already made it an internal
+change. § OPEN QUESTIONS lists what needs a decision.
+
+** THE PROBLEM
+The =gl= backend is written over =glow= (plans/rendering.org § BACKENDS),
+and =glow= is part of nazca's public API: every function in =nazca::gl=
+takes =&glow::Context=, from =Renderer::new= to =GpuMesh::free=. So:
+
+- *An embedder must depend on =glow= itself*, at the version nazca uses,
+  only to build the context it hands in. An embedder that makes no GL calls
+  of its own still names the crate.
+- *Every =glow= upgrade is a breaking change to nazca.* =glow= is pre-1.0,
+  so a move from 0.18 to 0.19 is semver-incompatible, and two =glow::Context=
+  types from different versions do not unify. Nazca would have to bump its
+  own minor version for a change no caller asked for.
+- *=glow= is the one dependency the =gl= feature adds*
+  ([[file:../project.org][../project.org]] § DEPENDENCY POLICY). The rest of
+  the crate is standard-library only.
+
+Removing =glow= outright and hiding it are separate questions, and only the
+first two points need the dependency gone from the API, not from the build.
+
+** WHAT GLOW DOES FOR NAZCA
+Measured against =src/gl.rs= at 0.2.1 (the same counts as at 0.2.0):
+
+- *68 distinct GL calls and 53 GL constants*, plus 11 handle and data types
+  (=Buffer=, =Texture=, =VertexArray=, =Framebuffer=, =Renderbuffer=,
+  =Program=, =UniformLocation=, =PixelUnpackData=, =PixelPackData= and the
+  context and its trait). Every call is an =unsafe fn=, which is why =gl= is
+  the one module allowed =unsafe=.
+- *Natively*, a table of function pointers filled from the embedder's
+  loader (=from_loader_function_cstr=), and a parse of =GL_VERSION= that says
+  whether the context is OpenGL ES. Nazca picks its shader header from that
+  (=#version 300 es= or =#version 330 core=). =glow='s native path pulls in
+  no other crate.
+- *In a browser*, the same calls over =web-sys='s =WebGl2RenderingContext=,
+  with =slotmap= tables standing in for the JS objects behind each handle.
+  It also requests every extension the browser offers when the context is
+  wrapped, which is what turns on =OES_texture_float_linear= for linearly
+  filtered continuous rasters (plans/rendering.org § RASTER). Under =gl= for
+  =wasm32-unknown-unknown= the tree is about two dozen crates: =glow=,
+  =slotmap=, =js-sys=, =wasm-bindgen=, =web-sys= and what they build with.
+
+The rest of =glow= (some 54,000 lines, most of it the generated GL 4.6
+table) nazca never calls.
+
+** STEP 1 -- NAZCA OWNS THE CONTEXT TYPE (recommended)
+Make =glow= an implementation detail. Nothing about drawing changes.
+
+- *=nazca::gl::Context=*, a struct with one private field, the
+  =glow::Context=. Every =gl: &glow::Context= parameter becomes =gl:
+  &Context=; the shape of the API is otherwise the same, so a caller's
+  change is mechanical.
+- *Two constructors, neither naming =glow=:*
+  - =Context::from_webgl2(web_sys::WebGl2RenderingContext)=, on =wasm32=
+    only. Safe, as =glow='s is.
+  - =unsafe fn Context::from_loader(impl FnMut(&CStr) -> *const c_void)=,
+    natively. Its safety contract is the one every nazca draw already
+    relies on: the loader returns OpenGL 3.3 core (or OpenGL ES 3.0)
+    functions, and that context is current on the calling thread whenever
+    nazca is handed this =Context=. Today that contract sits on =glow='s
+    constructor in the embedder's code; afterwards it sits on nazca's.
+- *Two small methods* for what callers now reach =glow= for:
+  =version(&self) -> String= (the =GL_VERSION= string, which the spikes
+  print) and =read_pixels(&self, size: [u32; 2]) -> Vec<u8>= (RGBA8, bottom
+  row first, for screenshots and checks such as =--check-state=). Nothing
+  else is exposed. An escape hatch returning the inner =glow::Context= would
+  put =glow= back in the API, so there is none.
+- *=web-sys= becomes a direct dependency*, =wasm32= only, optional under
+  =gl=, with just its =WebGl2RenderingContext= feature. It is already in the
+  tree through =glow=, so no crate is added. Its type does enter nazca's API,
+  but =web-sys= has stayed at 0.3 across years of releases, so an
+  embedder's copy unifies with nazca's where a second =glow= would not.
+  Taking a =web-sys= type is not a browser binding in the sense
+  [[file:../project.org][../project.org]] § ARCHITECTURE keeps out of nazca:
+  nazca exports nothing through =wasm-bindgen= and builds no =cdylib=.
+- *Released as 0.3.0*, since every =gl= signature changes. The README's
+  setup and feature table, plans/rendering.org § BACKENDS and
+  [[file:../project.org][../project.org]] § DEPENDENCY POLICY are brought up
+  to date with it.
+- *The spikes move over*: =examples/spike= builds its context through
+  =from_loader= and reads its screenshot and checks through =read_pixels=;
+  =spike-web= through =from_webgl2=, and drops its own =glow= dependency.
+
+/Done when/ no file outside =src/gl.rs= names =glow=, both spikes run as
+before natively and in Chrome's WebGL2 (picking, feature state and the
+filter through it, =--check-state= and C, rasters), and the native spike's
+=--screenshot= is byte-identical to 0.2.1's on the same machine.
+
+About an hour of work, most of it the signature change and the spikes.
+
+** STEP 2 -- REPLACE GLOW (only if a reason appears)
+With step 1 done, this changes no public signature: =Context= keeps its
+constructors and methods, and only what is inside it changes.
+
+- *Natively*, a struct of 68 =extern "system"= function pointers filled
+  through the same loader, the 53 constants copied from the GL headers, a
+  =GL_VERSION= parse for ES, and safe-looking wrappers like =glow='s, in
+  roughly 400 lines. It needs no crate, so *the native =gl= build would
+  become standard-library only.*
+- *In a browser, =web-sys= directly*, whose methods are safe: handles are
+  its own =WebGlBuffer=, =WebGlTexture= and so on, so no handle table, and
+  slices go through its =&[u8]= and =Option<&[u8]>= variants. About 300
+  lines. =glow= and =slotmap= leave the tree; =js-sys=, =wasm-bindgen= and
+  =web-sys= stay. Nazca must then request =OES_texture_float_linear= itself
+  when the context is wrapped, or continuous rasters quietly fall back to
+  nearest.
+- *Two implementations of the same 68 calls*, chosen by =cfg=, behind a
+  private trait or two modules of one shape. Each is thin, but each is
+  nazca's to keep correct, and a new GL call costs an entry in both.
+- *=unsafe= shrinks in browser builds*: the =web-sys= path needs none. The
+  native path is as =unsafe= as =glow= is today.
+
+/Done when/ as for step 1, with =glow= gone from =Cargo.lock= for every
+target and the native build of =gl= depending on nothing.
+
+Two to three days, mostly checking both paths against each other. Worth
+doing for one of: a native =gl= build that must be standard-library only; a
+GL call or behaviour =glow= lacks or gets wrong; or =glow= churn that keeps
+costing work even behind step 1. None applies today.
+
+** RULED OUT
+- *Re-exporting =glow= (=pub use glow=)*: an embedder could drop its own
+  line, but every =glow= bump would still break nazca's API. It hides the
+  dependency without decoupling it.
+- *=Context::from_glow(glow::Context)= as the constructor*: the embedder
+  names =glow= again, and is coupled to its version again.
+- *A JS shim of nazca's own in place of =web-sys=* (raw =extern "C"=
+  imports, a handle table in JS, a file every embedder must load next to
+  its =wasm-bindgen= output): it takes =web-sys= out of the tree, but nazca
+  would ship JavaScript and the embedder would wire it up, which is the
+  browser binding [[file:../project.org][../project.org]] § ARCHITECTURE
+  keeps in consumer crates.
+- *A backend trait the embedder implements* (nazca hands out draw calls,
+  the embedder makes them): it moves the 68 calls, their =unsafe= and the
+  shaders' GL assumptions into every embedder.
+- *=wgpu=*: already weighed and set aside (plans/rendering.org § BACKENDS).
+
+** OPEN QUESTIONS
+1. Do step 1, as 0.3.0? Recommended.
+2. Should =Renderer= own the =Context= instead of taking it in every call?
+   Callers would pass one thing fewer, but =Picker= and every =free= would
+   then take the =Renderer= in its place, and the API changes shape rather
+   than type. Proposed: no, keep the parameter, so step 1 stays one
+   mechanical change.
+3. Step 2: leave it until one of the reasons above appears, or do it now
+   for a standard-library-only native build? Proposed: leave it.
