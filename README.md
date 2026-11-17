@@ -104,10 +104,12 @@ layer drawn only through a state, as a filter, picks and exports only what
 is on screen.
 
 The native spike draws the Massachusetts counties in a window, and a click
-picks one and selects it:
+picks one and selects it. F shows every other county through a state, and
+`--svg out.svg` writes the view as an SVG:
 
     cargo run --features gl --example spike
     cargo run --features gl --example spike -- --screenshot out.png
+    cargo run --features gl --example spike -- --filter --svg out.svg
 
 `spike-web/` is the same in a browser:
 
@@ -157,12 +159,14 @@ are coloured by a colormap texture, unwarped or stretched over a
 caller-projected control grid. Each pixel belongs to one tile, so tiles that
 overlap never blend twice. Picking draws feature ids into a one-pixel integer
 target. Feature state redraws only the features a small texture of flags
-marks, so a selection or a hover rewrites that texture and no geometry.
+marks, so a selection or a hover rewrites that texture and no geometry; a
+pick can follow the same flags, so a filtered layer picks only what it shows.
 
 **SVG backend.** Fills come from the polygon rings rather than the triangles,
 and lines are exactly the segments the GPU strokes. A layer's fills and lines
 are gathered into one path per class, so a polygon split along tile edges
-shows no seams in an antialiasing viewer.
+shows no seams in an antialiasing viewer. Feature state works as on the GPU,
+from the same bytes of flags.
 
 **Camera.** Pan, zoom and rotate about a point, fit to bounds, and convert
 between screen and map. Matrices are composed in `f64`, so a tile's offset

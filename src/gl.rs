@@ -901,8 +901,9 @@ impl Renderer {
 /// first, so what picks is exactly what draws; draw order and stencil claims
 /// are the same as on screen, so the feature on top wins.
 ///
-/// Rasters are not picked, and do not hide the features beneath them from a
-/// pick. Reading back stalls the GPU pipeline, which is free for a click but
+/// A pick can follow a feature state ([`Picker::draw_state`]), as a screen
+/// draw does. Rasters are not picked, and do not hide the features beneath
+/// them from a pick. Reading back stalls the GPU pipeline, which is free for a click but
 /// wants throttling for hover.
 pub struct Picker {
     framebuffer: glow::Framebuffer,

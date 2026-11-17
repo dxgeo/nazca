@@ -485,7 +485,9 @@ cannot collide; coordinates are written to a hundredth of a pixel. A layout
 prepares its one view with =MeshBuilder::for_view(&camera)=: a frame around
 what the camera shows, at the camera's own resolution, so a 150 dpi page
 keeps more vertices than the screen. Rasters are not written (an SVG image
-needs encoded bytes, the =raster= backend's job). =examples/layout.rs= draws
+needs encoded bytes, the =raster= backend's job). Since 0.2.1 it writes
+through a feature state too (=SvgWriter::draw_state=, § FEATURE STATE).
+=examples/layout.rs= draws
 an 8 x 6 inch page at 150 dpi: the MLT basemap tile under the WKB counties,
 north up or turned, 37 KB of SVG; rendered with =rsvg-convert= the two
 sources register exactly.
