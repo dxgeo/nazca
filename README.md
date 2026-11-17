@@ -6,7 +6,7 @@ WebAssembly. Geometry is prepared once into tiles, then either redrawn every
 frame by the GPU backend or written once at print resolution by the SVG
 backend.
 
-Current version: 0.2.0.
+Current version: 0.2.1.
 
 
 ## PHILOSOPHY
@@ -99,6 +99,9 @@ mesh in the cache. The `gl` backend draws the plan over the embedder's GL
 context and picks the feature under the cursor. To draw chosen features
 differently, `Renderer::state` uploads a byte of flags per feature, and
 `Renderer::draw_state` draws only those holding a bit of a mask.
+`Picker::draw_state` and `SvgWriter::draw_state` follow the same flags, so a
+layer drawn only through a state, as a filter, picks and exports only what
+is on screen.
 
 The native spike draws the Massachusetts counties in a window, and a click
 picks one and selects it:
