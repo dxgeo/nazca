@@ -182,42 +182,64 @@ Ruled out:
 - *Picking ignores the pattern*: a fill picks wherever it covers, as a
   fill that draws nothing picks now.
 
-*** Later: symbols from path data
+*** Later: vector symbols
 Pixels serve any symbol, but they are fixed at the size they were drawn at:
 a marker drawn larger, at a deep zoom or on a large print, blurs until the
-embedder draws it again. Many icon sets are one monochrome path per icon,
-and a vector form of those stays crisp at any size and needs no rasterizer.
+embedder draws it again. A marker is usually a few shapes in a few colours
+(a pin in the class's colour, a white glyph on it, a dark halo under it),
+and a vector form of that stays crisp at any size and needs no rasterizer.
+It also lets an embedder build symbols from data rather than images.
 
-- *A third kind, /path/*: SVG path data (the =d= attribute) in a viewBox,
-  with a fill rule, an optional stroke width, and an anchor. Nazca parses
-  it with a small hand-written parser (absolute and relative =M L H V C S Q
-  T A Z=, arcs converted to cubics), flattens the curves to a tolerance at
-  the size drawn, and so needs no dependency. Only path data: no =<g>=,
-  transforms, styles, gradients or text, so markup with more than one path
-  or more than one colour stays a pixel symbol.
-- *Drawn with what nazca already has*: the filled shape triangulated by
-  =earcut= under the fill rule, a stroked shape as segments in the line
-  program. A stroke-based icon set (lines of one width with round ends)
-  maps onto the line program as it stands.
-- *A mask by nature*: one colour, from the class, as a mask symbol takes it.
-- *Prepared once per size*, not per feature: the flattened, triangulated
-  symbol is instanced at each point, so a layer of a thousand pins prepares
-  one pin.
-- *SVG output writes the path data as it is*, in a =<symbol>=: exact, and
-  safe by construction, since nothing but path data was accepted.
+- *A third kind, /vector/*: a box (as an SVG viewBox, y down), an anchor in
+  it, and an ordered list of *parts*, drawn first to last. A part is a shape
+  and a paint.
+- *A part's shape* comes one of two ways:
+  - /Path data/ (an SVG =d= attribute) with a fill rule. Nazca parses it with
+    a small hand-written parser (absolute and relative =M L H V C S Q T A Z=,
+    arcs converted to cubics) and needs no dependency. Only path data: no
+    =<g>=, transforms, styles, gradients or text, so markup that needs those
+    stays a pixel symbol. This is what icon sets publish.
+  - /Geometry through the =Sink= trait/, in box coordinates: polygons and
+    lines fed as tiles are, so WKB goes through nazca's own reader. This is
+    how an embedder builds a symbol from data, curves already flattened.
+- *A part's paint*: a fill and a stroke, each none, a literal colour, or a
+  /slot/: the class's =fill= or =line= colour, read from the palette at draw
+  time. A stroke has a width in box units. So one pin serves every class's
+  colour while its glyph stays white, and restyling a class recolours its
+  markers with no symbol prepared again.
+- *Drawn with what nazca already has*: fills triangulated by =earcut= under
+  the fill rule, strokes as segments in the line program, round ended. A
+  stroke-based icon set (lines of one width with round ends) maps onto the
+  line program as it stands.
+- *Prepared once*, not per feature: curves are flattened to a tolerance at
+  the largest size a palette draws the symbol at, and prepared again only if
+  a palette draws it larger. The prepared symbol is instanced at each point,
+  so a layer of a thousand pins prepares one pin. Its literal colours travel
+  with its vertices; slots are read from the class.
+- *Picking follows the shapes*: a part picks where it draws, so a click
+  between a pin's parts picks what lies under it.
+- *Limits the embedder can rely on*: parts per symbol and vertices per part
+  after flattening are capped, each an error naming the symbol and the part,
+  so a symbol built from data can't grow without bound. The caps are to
+  measure (§ CHECKS).
+- *SVG output writes each part as a =<path>=*: path data as it is handed
+  in, geometry as its rings and lines, in a =<symbol>= per symbol and class
+  used, with the class's colours in its slots. A =<use>= can't recolour two
+  slots of a shared =<symbol>= in every viewer, and a layer has few classes.
+  Exact, and safe by construction, since nothing but shapes was accepted.
 - *Edges need antialiasing.* =FILL_FS= gives a fill no antialiased edge
   of its own: polygons rely on their outline, or on a multisampled
   framebuffer if the embedder makes one. An icon's thin outline at 20 to 30
   pixels, a pixel wide or less, would look jagged without either. So either
-  a path symbol draws an antialiased edge itself (the fill's triangles
+  a vector symbol draws an antialiased edge itself (the fill's triangles
   plus a one-pixel feathered outline of the same rings in the line program,
-  as polygon outlines are drawn now), or path symbols need multisampling.
+  as polygon outlines are drawn now), or vector symbols need multisampling.
   § OPEN QUESTIONS 7.
 
-Not in the first release: the pixel route draws these icons already (an
-embedder rasterizes the path, or uses =Symbol::from_svg=), and this kind is
-worth its parser and instancing only once a symbol has to stay sharp past
-the size it was drawn at.
+Not in the first release: the pixel route draws these symbols already (an
+embedder rasterizes them, or uses =Symbol::from_svg=), and this kind is
+worth its parser and instancing once a symbol has to stay sharp past the
+size it was drawn at, or is built from data.
 
 *** SVG output
 - *=SvgWriter::symbols(&Symbols)=* before the layers that use them. Each
@@ -288,7 +310,7 @@ Ruled out:
    size says.
 6. *Version.* =Style= gains public fields, which breaks every embedder that
    builds one without =..Default::default()=: 0.3.0.
-7. *Antialiasing path symbols* (§ Later: symbols from path data).
+7. *Antialiasing vector symbols* (§ Later: vector symbols).
    Recommendation: a feathered outline drawn by the symbol itself, so it
    looks the same in every embedder. Multisampling smooths every edge at
    once, fills included, but costs memory and fill rate on every frame, and
@@ -312,9 +334,10 @@ Ruled out:
 6. *The README* (a section on symbols: kinds, sizes, the guard band rule,
    what SVG output writes) and *a release*, 0.3.0 as § OPEN QUESTIONS 6
    says.
-7. *Later, path symbols*: the path-data parser and flattening, the
-   instanced symbol mesh, the antialiased edge as § OPEN QUESTIONS 7
-   settles, =<symbol>= output. A release of its own.
+7. *Later, vector symbols*: parts from path data (the parser and
+   flattening) and from a =Sink=, literal and slot paint, the instanced
+   symbol mesh, picking by shape, the caps, the antialiased edge as § OPEN
+   QUESTIONS 7 settles, =<symbol>= output per class. A release of its own.
 
 ** CHECKS
 - *Packing*: unit tests in =symbol.rs=. Ids stay stable across adds and a
@@ -341,12 +364,16 @@ Ruled out:
   tile, so a point held by two tiles may be written twice. Invisible for an
   opaque dot; a translucent marker would show it. Check, and if so, write a
   point only from the tile whose own area holds it.
-- *Path symbols* (step 7): unit tests of the parser against every command,
-  absolute and relative, and arcs; a single-path pin from a public-domain
-  icon set (a filled outer contour with a hole, cubic curves) drawn at 16,
-  24, 64 and 256 pixels beside the same pin as pixels, sharp at every size,
-  its hole open under both fill rules it is wound for; its SVG output the
-  path data unchanged.
+- *Vector symbols* (step 7): unit tests of the parser against every
+  command, absolute and relative, and arcs; a single-path pin from a
+  public-domain icon set (a filled outer contour with a hole, cubic curves)
+  drawn at 16, 24, 64 and 256 pixels beside the same pin as pixels, sharp at
+  every size, its hole open under both fill rules it is wound for; its SVG
+  output the path data unchanged. A pin of three parts fed as WKB (a halo,
+  a body in the class's fill slot, a white dot) in three classes' colours,
+  recoloured by a palette rewrite alone; a click between its parts picks
+  what lies under it. The caps measured against a few public icon sets,
+  flattened at 256 pixels.
 - *Cost*: a frame of the 2,500-point grid as dots and as markers, and the
   mesh bytes and prepare time of a large line layer with and without
   distances (§ OPEN QUESTIONS 4).
