@@ -216,6 +216,23 @@ It also lets an embedder build symbols from data rather than images.
   a palette draws it larger. The prepared symbol is instanced at each point,
   so a layer of a thousand pins prepares one pin. Its literal colours travel
   with its vertices; slots are read from the class.
+- *Thinned to the size drawn.* Both kinds of part go through =MeshBuilder='s
+  snapping to the pixel grid and its dropping of points that share a pixel,
+  at that largest size, as tiles do. So geometry written densely, to print
+  large, costs a small marker on screen only the vertices its size shows.
+- *Print quality.* SVG output writes path data as it was handed in, curves
+  and all, so it is exact at any size. It writes geometry with every vertex
+  it was handed, unthinned, so a geometry part is as smooth on paper as it
+  was written: a curve's segments have to be short enough for the largest
+  size it prints at. For a circle of radius /r/ in /n/ segments the gap
+  between polygon and circle is /r/ (1 - cos(π / /n/)); facets show from
+  about 0.1 pixels at the output's resolution.
+- *=Symbol::facets(size_px)=* says where that fails, standard-library only:
+  each geometry part whose segments, where two of them turn by a small angle
+  θ (under 30°; sharper is a corner) and so stand for a curve, miss it by
+  more than 0.1 pixels at that size, the gap taken as /L/ θ / 8 for
+  segments of length /L/. An embedder calls it with the size and resolution
+  of its largest output, to warn an author before a print shows the facets.
 - *Picking follows the shapes*: a part picks where it draws, so a click
   between a pin's parts picks what lies under it.
 - *Limits the embedder can rely on*: parts per symbol and vertices per part
@@ -373,7 +390,11 @@ Ruled out:
   a body in the class's fill slot, a white dot) in three classes' colours,
   recoloured by a palette rewrite alone; a click between its parts picks
   what lies under it. The caps measured against a few public icon sets,
-  flattened at 256 pixels.
+  flattened at 256 pixels. Thinning: a disc of 256 segments drawn at 24
+  pixels prepares only the vertices a coarser disc of the same pixels
+  would, and looks the same; its SVG output keeps all 256. =facets=: a disc
+  of radius 30 pixels in 32 segments is named (a gap of about 0.14), and in
+  128 is not (under 0.01).
 - *Cost*: a frame of the 2,500-point grid as dots and as markers, and the
   mesh bytes and prepare time of a large line layer with and without
   distances (§ OPEN QUESTIONS 4).
