@@ -14,7 +14,7 @@ path = "src/lib.rs"
 # The default build is standard-library only (project.org § DEPENDENCY
 # POLICY). Each feature adds pure-Rust crates that build for
 # wasm32-unknown-unknown unmodified.
-gl = ["dep:glow"]
+gl = ["dep:glow", "dep:web-sys"]
 # Vector tile decoders for basemaps, hand-written: no dependency.
 mvt = []
 mlt = []
@@ -25,6 +25,11 @@ mlt = []
 # compose by piping text between their CLIs, or by a caller that links several
 # of them (see ../../architecture.org).
 glow = { version = "0.18.0", optional = true }
+
+# The browser's WebGL2 context, which `gl::Context::from_webgl2` takes. Already
+# in the tree through `glow`; named here so nazca's API need not name `glow`.
+[target.'cfg(all(target_family = "wasm", not(target_os = "emscripten")))'.dependencies]
+web-sys = { version = "0.3.100", optional = true, features = ["WebGl2RenderingContext"] }
 
 # Reads the MLT conformance fixtures' expected GeoJSON in tests.
 [dev-dependencies]
@@ -38,6 +43,9 @@ glutin-winit = "0.5.0"
 winit = "0.30.13"
 raw-window-handle = "0.6.2"
 png = "0.18.1"
+# The spike's own GL binding for --own-gl, as an embedder with GL calls of its
+# own keeps one beside nazca's context.
+glow = "0.18.0"
 
 [[test]]
 name = "vector_tiles"

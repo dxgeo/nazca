@@ -2,6 +2,17 @@
 //! natively. Enabled by the `gl` feature (`../plans/rendering.org` §
 //! BACKENDS).
 //!
+//! The embedder makes the GL context and wraps it in a [`Context`]
+//! ([`Context::from_webgl2`] in a browser, [`Context::from_loader`]
+//! natively), which every call here takes. `glow` is not part of the API.
+//! An embedder with GL calls of its own keeps its own binding over the same
+//! context; no handle passes between the two. Draws set the bindings they
+//! use (program, arrays, textures, stencil function), but the frame's state
+//! is set once, by [`Renderer::begin_frame`]: calls of the embedder's own
+//! between it and the frame's last draw restore what they change of the
+//! viewport, blending, the stencil, depth and scissor tests, face culling
+//! and the bound framebuffer.
+//!
 //! - *Fills* are the mesh's triangles, coloured by a [`Palette`] held as a
 //!   lookup texture, so restyling uploads one small texture.
 //! - *Lines* are uploaded as centerline segments and expanded in the vertex
@@ -43,6 +54,8 @@ use crate::raster::{Band, Raster, RasterMesh};
 use crate::style::{CLASSES, Colormap, Palette};
 use glow::HasContext;
 use std::collections::HashMap;
+#[cfg(any(not(target_family = "wasm"), target_os = "emscripten"))]
+use std::ffi::{CStr, c_void};
 
 const IDENTITY: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
 
@@ -302,6 +315,58 @@ impl Mode {
     }
 }
 
+/// The GL context nazca draws with: WebGL2 in a browser, OpenGL 3.3 core
+/// or OpenGL ES 3.0 natively. It wraps the embedder's context and names no
+/// binding, so the embedder needs no `glow` of its own and a `glow` upgrade
+/// changes nothing it sees. Every call below takes it.
+pub struct Context {
+    raw: glow::Context,
+}
+
+impl Context {
+    /// Wraps a browser's WebGL2 context. Every extension the browser offers
+    /// is turned on, among them the float filtering continuous rasters use.
+    #[cfg(all(target_family = "wasm", not(target_os = "emscripten")))]
+    pub fn from_webgl2(context: web_sys::WebGl2RenderingContext) -> Context {
+        Context { raw: glow::Context::from_webgl2_context(context) }
+    }
+
+    /// Wraps a native context through its loader, which returns the address
+    /// of a GL function by name (`eglGetProcAddress`, glutin's
+    /// `get_proc_address`).
+    ///
+    /// # Safety
+    ///
+    /// `load` returns OpenGL 3.3 core or OpenGL ES 3.0 functions of one
+    /// context, and that context is current on the calling thread whenever
+    /// this `Context` is handed to nazca.
+    #[cfg(any(not(target_family = "wasm"), target_os = "emscripten"))]
+    pub unsafe fn from_loader(load: impl FnMut(&CStr) -> *const c_void) -> Context {
+        // SAFETY: the caller's contract is glow's.
+        Context { raw: unsafe { glow::Context::from_loader_function_cstr(load) } }
+    }
+
+    /// The context's `GL_VERSION` string.
+    pub fn version(&self) -> String {
+        // SAFETY: a string query, on the caller's context.
+        unsafe { self.raw.get_parameter_string(glow::VERSION) }
+    }
+
+    /// Reads `size` pixels from the bound framebuffer's lower left corner,
+    /// as RGBA8, bottom row first.
+    pub fn read_pixels(&self, size: [u32; 2]) -> Vec<u8> {
+        let [w, h] = size;
+        let mut pixels = vec![0u8; w as usize * h as usize * 4];
+        // SAFETY: reads `w * h` RGBA8 pixels into a buffer of exactly that
+        // size; their rows are whole words, so the default pack alignment
+        // adds no padding.
+        unsafe {
+            self.raw.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixels)));
+        }
+        pixels
+    }
+}
+
 /// The compiled shaders and the shared unit square, built once per GL
 /// context.
 pub struct Renderer {
@@ -382,7 +447,8 @@ impl GpuMesh {
         self.bytes
     }
 
-    pub fn free(self, gl: &glow::Context) {
+    pub fn free(self, gl: &Context) {
+        let gl = &gl.raw;
         // SAFETY: deletes objects this mesh created and alone refers to.
         unsafe {
             for vao in [self.fill_vao, self.line_vao, self.point_vao] {
@@ -400,7 +466,8 @@ impl GpuRaster {
         self.bytes
     }
 
-    pub fn free(self, gl: &glow::Context) {
+    pub fn free(self, gl: &Context) {
+        let gl = &gl.raw;
         // SAFETY: deletes objects this raster created and alone refers to.
         unsafe {
             gl.delete_vertex_array(self.vao);
@@ -413,14 +480,16 @@ impl GpuRaster {
 }
 
 impl GpuPalette {
-    pub fn free(self, gl: &glow::Context) {
+    pub fn free(self, gl: &Context) {
+        let gl = &gl.raw;
         // SAFETY: deletes the palette's own texture.
         unsafe { gl.delete_texture(self.texture) }
     }
 }
 
 impl GpuColormap {
-    pub fn free(self, gl: &glow::Context) {
+    pub fn free(self, gl: &Context) {
+        let gl = &gl.raw;
         // SAFETY: deletes the colormap's own texture.
         unsafe { gl.delete_texture(self.texture) }
     }
@@ -432,14 +501,16 @@ impl GpuState {
         self.bytes
     }
 
-    pub fn free(self, gl: &glow::Context) {
+    pub fn free(self, gl: &Context) {
+        let gl = &gl.raw;
         // SAFETY: deletes the state's own texture.
         unsafe { gl.delete_texture(self.texture) }
     }
 }
 
 impl Renderer {
-    pub fn new(gl: &glow::Context) -> Result<Renderer, String> {
+    pub fn new(gl: &Context) -> Result<Renderer, String> {
+        let gl = &gl.raw;
         let embedded = gl.version().is_embedded;
         let header = if embedded { "#version 300 es\nprecision highp float;\nprecision highp int;\n" } else { "#version 330 core\n" };
         let pick = format!("{header}#define PICK\n");
@@ -483,7 +554,8 @@ impl Renderer {
     /// Uploads `mesh`: one buffer of vertices for the fill triangles' index
     /// buffer to point into, and one of segment instances, the outline
     /// segments then the points.
-    pub fn upload(&self, gl: &glow::Context, mesh: &Mesh) -> Result<GpuMesh, String> {
+    pub fn upload(&self, gl: &Context, mesh: &Mesh) -> Result<GpuMesh, String> {
+        let gl = &gl.raw;
         let mut vertices = Vec::with_capacity(mesh.vertex_count() * VERTEX_BYTES);
         for (v, id) in mesh.vertices.chunks_exact(3).zip(&mesh.ids) {
             vertices.extend_from_slice(&f32_bytes(v));
@@ -565,7 +637,8 @@ impl Renderer {
     /// band samples its nearest pixel, since classes cannot be blended; a
     /// continuous one blends its neighbours where the GPU can filter float
     /// textures and the band has no `nodata` value to blend into them.
-    pub fn upload_raster(&self, gl: &glow::Context, mesh: &RasterMesh, raster: &Raster) -> Result<GpuRaster, String> {
+    pub fn upload_raster(&self, gl: &Context, mesh: &RasterMesh, raster: &Raster) -> Result<GpuRaster, String> {
+        let gl = &gl.raw;
         let (w, h) = (raster.width() as i32, raster.height() as i32);
         let (internal, format, ty, data, kind, nodata, linear) = match raster.band() {
             Band::Categorical(v) => (glow::R8, glow::RED, glow::UNSIGNED_BYTE, v.to_vec(), 1, None, false),
@@ -607,14 +680,16 @@ impl Renderer {
         }
     }
 
-    pub fn palette(&self, gl: &glow::Context, palette: &Palette) -> Result<GpuPalette, String> {
+    pub fn palette(&self, gl: &Context, palette: &Palette) -> Result<GpuPalette, String> {
+        let gl = &gl.raw;
         // SAFETY: a texture of its own, filled from a local of 256 x 3 texels.
         let texture = unsafe { texture(gl, glow::RGBA32F, CLASSES as i32, 3, glow::RGBA, glow::FLOAT, &palette_texels(palette), false)? };
         Ok(GpuPalette { texture })
     }
 
     /// Restyles: rewrites `gpu` from `palette`. No tile is touched.
-    pub fn update_palette(&self, gl: &glow::Context, gpu: &GpuPalette, palette: &Palette) {
+    pub fn update_palette(&self, gl: &Context, gpu: &GpuPalette, palette: &Palette) {
+        let gl = &gl.raw;
         let texels = palette_texels(palette);
         // SAFETY: rewrites the whole of the palette's own texture, at the
         // size it was made with, from a local.
@@ -628,7 +703,8 @@ impl Renderer {
     /// Uploads feature flags: `flags[i]` belongs to feature id `first + i`,
     /// each bit a state of its own. A span too long for a texture is an
     /// error.
-    pub fn state(&self, gl: &glow::Context, first: u32, flags: &[u8]) -> Result<GpuState, String> {
+    pub fn state(&self, gl: &Context, first: u32, flags: &[u8]) -> Result<GpuState, String> {
+        let gl = &gl.raw;
         let texels = state_texels(flags);
         let rows = texels.len() / STATE_ROW;
         // SAFETY: an integer query, then a texture of its own, filled from
@@ -645,7 +721,8 @@ impl Renderer {
 
     /// Changes features' states: rewrites `gpu` from `flags`, as long as the
     /// flags it was made with. No tile is touched.
-    pub fn update_state(&self, gl: &glow::Context, gpu: &GpuState, flags: &[u8]) -> Result<(), String> {
+    pub fn update_state(&self, gl: &Context, gpu: &GpuState, flags: &[u8]) -> Result<(), String> {
+        let gl = &gl.raw;
         if flags.len() != gpu.count as usize {
             return Err(format!("{} flags for a state of {} features", flags.len(), gpu.count));
         }
@@ -661,7 +738,8 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn colormap(&self, gl: &glow::Context, colormap: &Colormap) -> Result<GpuColormap, String> {
+    pub fn colormap(&self, gl: &Context, colormap: &Colormap) -> Result<GpuColormap, String> {
+        let gl = &gl.raw;
         let texels: Vec<u8> = colormap.entries.iter().flatten().copied().collect();
         // SAFETY: a texture of its own, filled from a local of 256 texels.
         // Linear, so a continuous ramp is smooth between entries; a
@@ -674,7 +752,8 @@ impl Renderer {
     /// camera's, clears to `background`, and sets the blending and stencil
     /// state every draw relies on. Needs a stencil buffer; without one,
     /// overlapping tiles draw over each other.
-    pub fn begin_frame(&self, gl: &glow::Context, camera: &Camera, background: [f32; 4]) {
+    pub fn begin_frame(&self, gl: &Context, camera: &Camera, background: [f32; 4]) {
+        let gl = &gl.raw;
         let [w, h] = camera.size_px;
         let [r, g, b, a] = background;
         // SAFETY: global state and a clear, on the caller's context.
@@ -694,7 +773,8 @@ impl Renderer {
 
     /// Starts a layer: every pixel is unclaimed again, so this layer's tiles
     /// draw over the last layer's.
-    pub fn begin_layer(&self, gl: &glow::Context) {
+    pub fn begin_layer(&self, gl: &Context) {
+        let gl = &gl.raw;
         // SAFETY: a stencil clear on the bound framebuffer.
         unsafe {
             gl.stencil_mask(0xff);
@@ -704,20 +784,23 @@ impl Renderer {
 
     /// Draws `mesh` where `camera` puts it, styled by `palette`: fills, then
     /// lines, then points, all within the pixels the tile claims.
-    pub fn draw(&self, gl: &glow::Context, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette) {
+    pub fn draw(&self, gl: &Context, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette) {
+        let gl = &gl.raw;
         self.draw_mesh(gl, mesh, camera, palette, Mode::Screen);
     }
 
     /// Draws only the features of `mesh` whose flags in `state` share a bit
     /// with `mask`, styled by `palette`, as [`Renderer::draw`] draws: start
     /// a layer for it and it lands over the layers before.
-    pub fn draw_state(&self, gl: &glow::Context, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette, state: &GpuState, mask: u8) {
+    pub fn draw_state(&self, gl: &Context, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette, state: &GpuState, mask: u8) {
+        let gl = &gl.raw;
         self.draw_mesh(gl, mesh, camera, palette, Mode::State(StateTest::new(state, mask)));
     }
 
     /// Draws a raster tile through `colormap` at `opacity`, within the
     /// pixels its mesh claims.
-    pub fn draw_raster(&self, gl: &glow::Context, raster: &GpuRaster, camera: &Camera, colormap: &GpuColormap, opacity: f32) {
+    pub fn draw_raster(&self, gl: &Context, raster: &GpuRaster, camera: &Camera, colormap: &GpuColormap, opacity: f32) {
+        let gl = &gl.raw;
         let matrix = camera.matrix(&raster.frame);
         let footprint = |gl: &glow::Context| {
             // SAFETY: draws the raster's own triangles from its own array.
@@ -879,7 +962,8 @@ impl Renderer {
     }
 
     /// Frees the shaders and the shared square.
-    pub fn free(self, gl: &glow::Context) {
+    pub fn free(self, gl: &Context) {
+        let gl = &gl.raw;
         // SAFETY: deletes objects this renderer created and alone refers to.
         unsafe {
             for p in [self.fill, self.fill_pick, self.fill_state, self.fill_pick_state, self.line, self.line_pick, self.line_state, self.line_pick_state, self.raster, self.stencil] {
@@ -913,7 +997,8 @@ pub struct Picker {
 }
 
 impl Picker {
-    pub fn new(gl: &glow::Context) -> Result<Picker, String> {
+    pub fn new(gl: &Context) -> Result<Picker, String> {
+        let gl = &gl.raw;
         // SAFETY: creates a framebuffer and renderbuffers of its own and
         // checks the result is complete before it is used.
         unsafe {
@@ -941,7 +1026,8 @@ impl Picker {
     /// Lines and points narrower than `tolerance_px` pick as if that wide,
     /// so a hairline can still be clicked. Binds the pick framebuffer until
     /// [`Picker::finish`].
-    pub fn begin(&mut self, gl: &glow::Context, camera: &Camera, px: [f64; 2], tolerance_px: f32) {
+    pub fn begin(&mut self, gl: &Context, camera: &Camera, px: [f64; 2], tolerance_px: f32) {
+        let gl = &gl.raw;
         let [w, h] = [camera.size_px[0] as f64, camera.size_px[1] as f64];
         // The pixel's centre in clip space, then a map from clip space that
         // puts it at the centre and one pixel across the whole target.
@@ -962,14 +1048,16 @@ impl Picker {
     }
 
     /// Starts a layer, as [`Renderer::begin_layer`] does on screen.
-    pub fn begin_layer(&self, gl: &glow::Context) {
+    pub fn begin_layer(&self, gl: &Context) {
+        let gl = &gl.raw;
         // SAFETY: a stencil clear on the picker's framebuffer.
         unsafe { gl.clear_buffer_depth_stencil(glow::DEPTH_STENCIL, 0, 1.0, 0) }
     }
 
     /// Draws `mesh` for picking, as `layer`. Call in the order the screen
     /// draws.
-    pub fn draw(&self, gl: &glow::Context, renderer: &Renderer, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette, layer: u32) {
+    pub fn draw(&self, gl: &Context, renderer: &Renderer, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette, layer: u32) {
+        let gl = &gl.raw;
         renderer.draw_mesh(gl, mesh, camera, palette, Mode::Pick { post: self.post, layer, min_half: self.min_half, state: None });
     }
 
@@ -979,7 +1067,8 @@ impl Picker {
     /// the state and mask the screen drew a layer with, a pick sees exactly
     /// what is on screen.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw_state(&self, gl: &glow::Context, renderer: &Renderer, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette, layer: u32, state: &GpuState, mask: u8) {
+    pub fn draw_state(&self, gl: &Context, renderer: &Renderer, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette, layer: u32, state: &GpuState, mask: u8) {
+        let gl = &gl.raw;
         let state = Some(StateTest::new(state, mask));
         renderer.draw_mesh(gl, mesh, camera, palette, Mode::Pick { post: self.post, layer, min_half: self.min_half, state });
     }
@@ -987,7 +1076,8 @@ impl Picker {
     /// Reads the pixel back and rebinds the default framebuffer. `None` if
     /// nothing was drawn there. The next frame's [`Renderer::begin_frame`]
     /// restores the viewport and blending.
-    pub fn finish(&self, gl: &glow::Context) -> Option<Pick> {
+    pub fn finish(&self, gl: &Context) -> Option<Pick> {
+        let gl = &gl.raw;
         let mut texel = [0u8; 16];
         // SAFETY: reads one RGBA32UI texel of the picker's own framebuffer
         // into a buffer of exactly that size.
@@ -999,7 +1089,8 @@ impl Picker {
         (word(2) == 1).then(|| Pick { layer: word(0), feature: word(1) })
     }
 
-    pub fn free(self, gl: &glow::Context) {
+    pub fn free(self, gl: &Context) {
+        let gl = &gl.raw;
         // SAFETY: deletes the picker's own objects.
         unsafe {
             gl.delete_framebuffer(self.framebuffer);

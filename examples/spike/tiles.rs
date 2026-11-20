@@ -10,7 +10,7 @@
 //! embedder fetches asynchronously and draws whatever the plan says now.
 
 use crate::data::{self, Counties, Overlay};
-use nazca::gl::{GpuColormap, GpuMesh, GpuPalette, GpuRaster, GpuState, Pick, Picker, Renderer};
+use nazca::gl::{Context, GpuColormap, GpuMesh, GpuPalette, GpuRaster, GpuState, Pick, Picker, Renderer};
 use nazca::grid::TileFrame;
 use nazca::svg::SvgWriter;
 use nazca::{Camera, Mesh, MeshBuilder, Palette, Plan, Style, TileCache, TileGrid, TileId, TileKey, TileSelector};
@@ -72,7 +72,7 @@ pub struct Stats {
 impl TiledMap {
     /// The counties on 512-pixel Web Mercator tiles, cached up to `budget`
     /// bytes, with `overlay` over them.
-    pub fn new(gl: &glow::Context, renderer: &Renderer, budget: usize, overlay: Overlay) -> TiledMap {
+    pub fn new(gl: &Context, renderer: &Renderer, budget: usize, overlay: Overlay) -> TiledMap {
         let counties = Counties::load();
         let mut map = TiledMap {
             flags: vec![0; counties.len()],
@@ -103,7 +103,7 @@ impl TiledMap {
         self.overlay
     }
 
-    pub fn set_overlay(&mut self, gl: &glow::Context, renderer: &Renderer, overlay: Overlay) {
+    pub fn set_overlay(&mut self, gl: &Context, renderer: &Renderer, overlay: Overlay) {
         if let Some((raster, colormap)) = self.raster.take() {
             raster.free(gl);
             colormap.free(gl);
@@ -117,7 +117,14 @@ impl TiledMap {
 
     /// Draws one frame of `camera`'s view, preparing and uploading the tiles
     /// it needs that the cache lacks.
-    pub fn draw(&mut self, gl: &glow::Context, renderer: &Renderer, camera: &Camera) -> Stats {
+    pub fn draw(&mut self, gl: &Context, renderer: &Renderer, camera: &Camera) -> Stats {
+        self.draw_with(gl, renderer, camera, &mut || {})
+    }
+
+    /// Draws as [`TiledMap::draw`] does, calling `between` after the
+    /// counties and before the chosen ones over them: where an embedder's GL
+    /// calls of its own would go.
+    pub fn draw_with(&mut self, gl: &Context, renderer: &Renderer, camera: &Camera, between: &mut dyn FnMut()) -> Stats {
         renderer.begin_frame(gl, camera, data::BACKGROUND);
         self.cache.begin_frame();
         self.needed.clear();
@@ -156,6 +163,7 @@ impl TiledMap {
                 (true, None) => {}
             }
         }
+        between();
         for (bit, palette) in [(SELECTED, &self.selected), (HOVERED, &self.hovered)] {
             renderer.begin_layer(gl);
             for &id in &self.plan.draw {
@@ -180,7 +188,7 @@ impl TiledMap {
 
     /// The county under screen position `px`, over the tiles the last frame
     /// drew, and its feature id.
-    pub fn pick(&mut self, gl: &glow::Context, renderer: &Renderer, camera: &Camera, px: [f64; 2]) -> Option<(&'static str, u32)> {
+    pub fn pick(&mut self, gl: &Context, renderer: &Renderer, camera: &Camera, px: [f64; 2]) -> Option<(&'static str, u32)> {
         self.picker.begin(gl, camera, px, 6.0);
         self.picker.begin_layer(gl);
         for &id in &self.plan.draw {
@@ -198,7 +206,7 @@ impl TiledMap {
 
     /// Flips state `bit` of `feature`, rewriting the flags of the tiles that
     /// hold it. Nothing is prepared or uploaded but those.
-    pub fn toggle(&mut self, gl: &glow::Context, renderer: &Renderer, feature: u32, bit: u8) {
+    pub fn toggle(&mut self, gl: &Context, renderer: &Renderer, feature: u32, bit: u8) {
         self.flags[feature as usize] ^= bit;
         for (&id, state) in &self.states {
             let span = self.cache.get(TileKey { source: COUNTIES, tile: id }).unwrap().span.clone();
@@ -210,7 +218,7 @@ impl TiledMap {
 
     /// Shows every other county, or all of them again. Rewrites every tile's
     /// flags; prepares and uploads nothing.
-    pub fn set_filter(&mut self, gl: &glow::Context, renderer: &Renderer, on: bool) {
+    pub fn set_filter(&mut self, gl: &Context, renderer: &Renderer, on: bool) {
         self.filtered = on;
         for (i, f) in self.flags.iter_mut().enumerate() {
             *f = if on && i % 2 == 0 { *f | SHOWN } else { *f & !SHOWN };
@@ -247,7 +255,7 @@ impl TiledMap {
     }
 
     /// Flips state `bit` of the county picked last, if any.
-    pub fn toggle_last(&mut self, gl: &glow::Context, renderer: &Renderer, bit: u8) {
+    pub fn toggle_last(&mut self, gl: &Context, renderer: &Renderer, bit: u8) {
         if let Some(feature) = self.last_pick {
             self.toggle(gl, renderer, feature, bit);
         }
@@ -309,8 +317,7 @@ fn cell_centre(n: u32) -> [f32; 2] {
 /// masks over several bits, and rewriting flags. Then picks every cell
 /// through the state, over a grid of fills a layer below: a cell picks its
 /// own feature where it holds the bit and the fill beneath where it doesn't.
-pub fn check_state(gl: &glow::Context, renderer: &Renderer, size: [u32; 2]) -> Result<String, String> {
-    use glow::HasContext;
+pub fn check_state(gl: &Context, renderer: &Renderer, size: [u32; 2]) -> Result<String, String> {
     let count = (GRID * GRID) as usize;
     let camera = Camera::new([0.0, 0.0], 2.0 / size[0].min(size[1]) as f64, size);
     let mut palette = Palette::new();
@@ -334,9 +341,7 @@ pub fn check_state(gl: &glow::Context, renderer: &Renderer, size: [u32; 2]) -> R
                 renderer.begin_layer(gl);
                 renderer.draw_state(gl, &mesh, &camera, &palette, state, mask);
                 let [w, h] = size.map(|v| v as usize);
-                let mut pixels = vec![0u8; w * h * 4];
-                // SAFETY: reads the frame just drawn into a buffer sized for it.
-                unsafe { gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixels))) };
+                let pixels = gl.read_pixels(size);
                 for n in 0..count {
                     let [x, y] = cell_centre(n as u32);
                     let half = size[0].min(size[1]) as f32 / 2.0;

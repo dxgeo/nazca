@@ -1,4 +1,4 @@
-//! The browser half of nazca's `glow` spike: the same counties and the same
+//! The browser half of nazca's GL spike: the same counties and the same
 //! camera, tile selector, tile cache and `gl` backend as `../examples/spike`,
 //! in a WebGL2 canvas. Drag to pan, scroll to zoom about the cursor,
 //! right-drag to rotate about the canvas's centre, click to pick a county
@@ -19,9 +19,8 @@ mod data;
 mod tiles;
 
 use data::Overlay;
-use glow::HasContext;
 use nazca::Camera;
-use nazca::gl::Renderer;
+use nazca::gl::{Context, Renderer};
 use std::cell::RefCell;
 use std::rc::Rc;
 use tiles::{HOVERED, SELECTED, TiledMap};
@@ -30,7 +29,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::{AddEventListenerOptions, HtmlCanvasElement, KeyboardEvent, MouseEvent, WebGl2RenderingContext, WebGlContextAttributes, WheelEvent};
 
 struct State {
-    gl: glow::Context,
+    gl: Context,
     renderer: Renderer,
     map: TiledMap,
     camera: Camera,
@@ -84,10 +83,9 @@ pub fn start() -> Result<(), JsValue> {
     attributes.set_stencil(true);
     let context: WebGl2RenderingContext =
         canvas.get_context_with_context_options("webgl2", &attributes)?.ok_or("WebGL2 unavailable")?.dyn_into()?;
-    let gl = glow::Context::from_webgl2_context(context);
+    let gl = Context::from_webgl2(context);
     let renderer = Renderer::new(&gl).map_err(|e| JsValue::from_str(&e))?;
-    // SAFETY: a string query on the context just created.
-    let version = unsafe { gl.get_parameter_string(glow::VERSION) };
+    let version = gl.version();
 
     let map = TiledMap::new(&gl, &renderer, 16 << 20, Overlay::None);
     let mut camera = Camera::new([0.0, 0.0], 1.0, [w, h]);

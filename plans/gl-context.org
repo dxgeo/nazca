@@ -81,10 +81,13 @@ Make =glow= an implementation detail. Nothing about drawing changes.
   put =glow= back in the API, so there is none.
 - *An embedder with GL calls of its own* (an overlay, a framebuffer it draws
   into) keeps its own =glow::Context=, or any binding, built from the same
-  loader or the same =WebGl2RenderingContext=. The two wrap one GL context;
-  no handle passes between them, and nazca already sets the state it draws
-  with (=begin_frame= sets the viewport and clears). The README's setup
-  says so.
+  loader or the same =WebGl2RenderingContext=. The two wrap one GL context,
+  and no handle passes between them. Nazca's draws set the bindings they use
+  (program, arrays, textures, stencil function), but the frame's state
+  (viewport, blending, the stencil, depth and scissor tests, face culling,
+  the bound framebuffer) only =begin_frame= sets: calls made between it and
+  the frame's last draw restore what they change of it. =gl.rs='s module
+  docs and the README's setup say so.
 - *=web-sys= becomes a direct dependency*, =wasm32= only, optional under
   =gl=, with just its =WebGl2RenderingContext= feature. It is already in the
   tree through =glow=, so no crate is added. Its type does enter nazca's API,
@@ -101,12 +104,23 @@ Make =glow= an implementation detail. Nothing about drawing changes.
   =from_loader= and reads its screenshot and checks through =read_pixels=;
   =spike-web= through =from_webgl2=, and drops its own =glow= dependency.
 
-/Done when/ no file outside =src/gl.rs= names =glow=, both spikes run as
+/Done when/ no file outside =src/gl.rs= names =glow= but the native spike's
+=--own-gl=, which stands for an embedder's own binding, both spikes run as
 before natively and in Chrome's WebGL2 (picking, feature state and the
 filter through it, =--check-state= and C, rasters), the native spike's
 =--screenshot= is byte-identical to 0.2.1's on the same machine, and the
 native spike, drawing through a second =glow::Context= over the same GL
 context between two of nazca's layers, still draws both layers as before.
+
+/Built 2026-11-20, natively/: the four views of the native spike (plain;
+turned 30° with the continuous raster; a selection and a hover; the filter
+with the categorical raster) are byte-identical to 0.2.1's on an Apple silicon
+Mac (GL 4.1 Metal), =--check-state= passes as before (90,000 features read
+back, 45,000 picked), and a pick finds the same county. =--own-gl= clears a
+square between the counties and the chosen ones through a binding of its
+own, leaving its own array, texture unit and texture bound and no program:
+no pixel outside the square differs. The browser spike builds; its run in
+Chrome's WebGL2 is still to do.
 
 About an hour of work, most of it the signature change and the spikes.
 

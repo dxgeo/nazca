@@ -434,6 +434,12 @@ Not a backend but also feature-gated: =mvt= (decoder, no dependency;
   =f32= data.
 - *Native windowing is the embedder's.* An example under =examples/= using
   =winit= + =glutin= (dev-dependencies only) is the reference embedder.
+- *So is the GL context; nazca wraps it.* Since 0.3.0 every =gl= call takes
+  a =gl::Context=, made from a browser's =WebGl2RenderingContext= or a
+  native loader, and =glow= is not in the API (plans/gl-context.org). An
+  embedder with GL calls of its own keeps its own binding over the same
+  context, and restores the frame's state that =begin_frame= set if it
+  calls between draws (=gl.rs='s module docs).
 
 /The =glow= backend, implemented 2026-10-30 (=src/gl.rs=):/
 - *Fills*: the mesh's triangles, coloured from the palette texture.

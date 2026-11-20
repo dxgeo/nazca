@@ -66,13 +66,13 @@ name = "nazca"
 version = "0.2.1"
 dependencies = [
  "glow",
+ "web-sys",
 ]
 
 [[package]]
 name = "nazca-spike-web"
 version = "0.0.0"
 dependencies = [
- "glow",
  "nazca",
  "wasm-bindgen",
  "web-sys",

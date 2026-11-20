@@ -1,4 +1,4 @@
-//! The native half of the `glow` spike (`plans/rendering.org` § V1 SLICE):
+//! The native half of the GL spike (`plans/rendering.org` § V1 SLICE):
 //! the Massachusetts counties, prepared tile by tile through nazca's camera,
 //! tile selector and tile cache and drawn by its `gl` backend in a winit
 //! window over an OpenGL 3.3 core context. Drag to pan, scroll to zoom about
@@ -20,7 +20,10 @@
 //! state after the first frame. `--filter` opens showing every other county,
 //! as F toggles. `--svg out.svg` writes the first frame as an SVG, through
 //! the same states, and exits. `--check-state` reads back and picks a
-//! synthetic grid of features drawn by state, reports and exits.
+//! synthetic grid of features drawn by state, reports and exits. `--own-gl`
+//! makes GL calls of the spike's own between two of nazca's layers, through
+//! a `glow` binding of its own over the same context, as an embedder drawing
+//! something of its own would: a square in the top left corner.
 
 mod data;
 mod tiles;
@@ -33,10 +36,10 @@ use glutin::surface::{GlSurface, Surface, WindowSurface};
 use glutin_winit::{DisplayBuilder, GlWindow};
 use glow::HasContext;
 use nazca::Camera;
-use nazca::gl::Renderer;
+use nazca::gl::{Context, Renderer};
 use raw_window_handle::HasWindowHandle;
 use std::num::NonZeroU32;
-use tiles::{HOVERED, SELECTED, TiledMap};
+use tiles::{HOVERED, SELECTED, Stats, TiledMap};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -48,9 +51,55 @@ struct Gfx {
     window: Window,
     surface: Surface<WindowSurface>,
     context: PossiblyCurrentContext,
-    gl: glow::Context,
+    gl: Context,
     renderer: Renderer,
     map: TiledMap,
+    own: Option<OwnGl>,
+}
+
+impl Gfx {
+    fn draw(&mut self, camera: &Camera) -> Stats {
+        match &self.own {
+            Some(own) => self.map.draw_with(&self.gl, &self.renderer, camera, &mut || own.draw(camera.size_px[1])),
+            None => self.map.draw(&self.gl, &self.renderer, camera),
+        }
+    }
+}
+
+/// The spike's own GL objects and the binding it draws them through.
+struct OwnGl {
+    gl: glow::Context,
+    vao: glow::VertexArray,
+    texture: glow::Texture,
+}
+
+impl OwnGl {
+    fn new(gl: glow::Context) -> OwnGl {
+        // SAFETY: creates objects of its own on the current context.
+        let (vao, texture) = unsafe { (gl.create_vertex_array().unwrap(), gl.create_texture().unwrap()) };
+        OwnGl { gl, vao, texture }
+    }
+
+    /// Clears a square in the top left corner of a framebuffer `height`
+    /// pixels high. It leaves its own array, texture and texture unit bound
+    /// and no program, which nazca's draws must not rely on, and restores the
+    /// scissor test, the one part of the frame's state it changes (`gl.rs`'s
+    /// module docs).
+    fn draw(&self, height: u32) {
+        // SAFETY: binds objects of its own and clears within a scissor, on
+        // the context nazca draws with, current on this thread.
+        unsafe {
+            self.gl.use_program(None);
+            self.gl.bind_vertex_array(Some(self.vao));
+            self.gl.active_texture(glow::TEXTURE3);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+            self.gl.enable(glow::SCISSOR_TEST);
+            self.gl.scissor(16, height as i32 - 56, 40, 40);
+            self.gl.clear_color(0.9, 0.1, 0.6, 1.0);
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+            self.gl.disable(glow::SCISSOR_TEST);
+        }
+    }
 }
 
 struct Options {
@@ -62,6 +111,7 @@ struct Options {
     states: Vec<([f64; 2], u8)>,
     check_state: bool,
     filter: bool,
+    own_gl: bool,
     svg: Option<String>,
     zoom: f64,
 }
@@ -94,7 +144,7 @@ impl App {
             self.options.filter = false;
             g.map.set_filter(&g.gl, &g.renderer, true);
         }
-        let stats = g.map.draw(&g.gl, &g.renderer, camera);
+        let stats = g.draw(camera);
         if stats.prepared > 0 {
             println!(
                 "level {}: {} tiles drawn, {} prepared; {} cached, {} KB",
@@ -126,12 +176,8 @@ impl App {
             let [w, h] = camera.size_px;
             // The pick (if any) rebound the window; draw again so the read
             // sees a frame drawn after it.
-            g.map.draw(&g.gl, &g.renderer, camera);
-            let mut pixels = vec![0u8; (w * h * 4) as usize];
-            // SAFETY: reads the frame just drawn into a buffer sized for it.
-            unsafe {
-                g.gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixels)));
-            }
+            g.draw(camera);
+            let pixels = g.gl.read_pixels([w, h]);
             // GL's rows run bottom-up; PNG's top-down.
             let flipped: Vec<u8> = pixels.chunks((w * 4) as usize).rev().flatten().copied().collect();
             let file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
@@ -173,15 +219,18 @@ impl ApplicationHandler for App {
             .build(window.window_handle().ok().map(|h| h.as_raw()));
         let surface_attributes = window.build_surface_attributes(Default::default()).unwrap();
         // SAFETY: the context and surface are made from this display's own
-        // config, for a window that outlives them (both live in `Gfx`).
-        let (context, surface, gl) = unsafe {
+        // config, for a window that outlives them (both live in `Gfx`); the
+        // loader's functions are an OpenGL 3.3 core context's, current on
+        // this thread from here on.
+        let (context, surface, gl, own) = unsafe {
             let context = display.create_context(&config, &context_attributes).unwrap();
             let surface = display.create_window_surface(&config, &surface_attributes).unwrap();
             let context = context.make_current(&surface).unwrap();
-            let gl = glow::Context::from_loader_function_cstr(|s| display.get_proc_address(s));
-            (context, surface, gl)
+            let gl = Context::from_loader(|s| display.get_proc_address(s));
+            let own = self.options.own_gl.then(|| OwnGl::new(glow::Context::from_loader_function_cstr(|s| display.get_proc_address(s))));
+            (context, surface, gl, own)
         };
-        println!("GL: {}, stencil bits: {}", unsafe { gl.get_parameter_string(glow::VERSION) }, config.stencil_size());
+        println!("GL: {}, stencil bits: {}", gl.version(), config.stencil_size());
 
         let renderer = Renderer::new(&gl).unwrap();
         let map = TiledMap::new(&gl, &renderer, 16 << 20, self.options.overlay);
@@ -194,7 +243,7 @@ impl ApplicationHandler for App {
         camera.zoom_about([size.width as f64 / 2.0, size.height as f64 / 2.0], self.options.zoom);
         self.camera = Some(camera);
         window.request_redraw();
-        self.gfx = Some(Gfx { window, surface, context, gl, renderer, map });
+        self.gfx = Some(Gfx { window, surface, context, gl, renderer, map, own });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -273,10 +322,10 @@ impl ApplicationHandler for App {
 
 fn main() {
     let usage = || -> ! {
-        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state]");
+        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state] [--own-gl]");
         std::process::exit(2);
     };
-    let mut options = Options { screenshot: None, bearing: 0.0, overlay: Overlay::None, pick: None, states: Vec::new(), check_state: false, filter: false, svg: None, zoom: 1.0 };
+    let mut options = Options { screenshot: None, bearing: 0.0, overlay: Overlay::None, pick: None, states: Vec::new(), check_state: false, filter: false, own_gl: false, svg: None, zoom: 1.0 };
     let mut args = std::env::args().skip(1);
     let point = |value: &str| -> [f64; 2] {
         let xy: Vec<f64> = value.split(',').map(|v| v.parse().unwrap_or_else(|_| usage())).collect();
@@ -290,6 +339,10 @@ fn main() {
         }
         if flag == "--filter" {
             options.filter = true;
+            continue;
+        }
+        if flag == "--own-gl" {
+            options.own_gl = true;
             continue;
         }
         let value = args.next().unwrap_or_else(|| usage());
