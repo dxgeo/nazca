@@ -6,7 +6,8 @@
 
 ** STATUS -- steps 0 to 6 decided 2026-11-20 (user decision), building
 Written 2026-11-19 as a proposal. § OPEN QUESTIONS 1 to 6 are decided, and
-steps 0 to 6 are being built for 0.3.0. Step 7, vector symbols, waits on
+steps 0 to 6 are being built for 0.3.0, on the =custom-symbols= branch. Step
+0 is built (2026-11-20). Step 7, vector symbols, waits on
 § OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
 symbol at a time. Markers, dashes and pattern fills are three parts that
 share an atlas and a palette layout, so each can be built once the shared

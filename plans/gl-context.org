@@ -4,10 +4,11 @@
 
 * The GL Context
 
-** STATUS -- step 1 decided 2026-11-20 (user decision), building
-Written 2026-11-10, checked against 0.2.1 2026-11-17. Step 1 is being built
-for 0.3.0, as step 0 of plans/custom-symbols.org, so its break ships with
-that plan's. Step 2 is left until a reason for it appears; it is written
+** STATUS -- step 1 decided 2026-11-20 (user decision), built 2026-11-20
+Written 2026-11-10, checked against 0.2.1 2026-11-17. Step 1 is built, as
+step 0 of plans/custom-symbols.org, and unreleased: its break ships in 0.3.0
+with that plan's. § THE PROBLEM and § WHAT GLOW DOES FOR NAZCA describe
+0.2.1. Step 2 is left until a reason for it appears; it is written
 down so that, if it is ever wanted, step 1 has already made it an internal
 change. § OPEN QUESTIONS records the answers.
 
@@ -71,8 +72,8 @@ Make =glow= an implementation detail. Nothing about drawing changes.
     natively. Its safety contract is the one every nazca draw already
     relies on: the loader returns OpenGL 3.3 core (or OpenGL ES 3.0)
     functions, and that context is current on the calling thread whenever
-    nazca is handed this =Context=. Today that contract sits on =glow='s
-    constructor in the embedder's code; afterwards it sits on nazca's.
+    nazca is handed this =Context=. In 0.2.1 that contract sat on =glow='s
+    constructor in the embedder's code; from 0.3.0 it sits on nazca's.
 - *Two small methods* for what callers now reach =glow= for:
   =version(&self) -> String= (the =GL_VERSION= string, which the spikes
   print) and =read_pixels(&self, size: [u32; 2]) -> Vec<u8>= (RGBA8, bottom
@@ -112,15 +113,19 @@ filter through it, =--check-state= and C, rasters), the native spike's
 native spike, drawing through a second =glow::Context= over the same GL
 context between two of nazca's layers, still draws both layers as before.
 
-/Built 2026-11-20, natively/: the four views of the native spike (plain;
+/Built 2026-11-20/. Natively, the four views of the native spike (plain;
 turned 30° with the continuous raster; a selection and a hover; the filter
 with the categorical raster) are byte-identical to 0.2.1's on an Apple silicon
 Mac (GL 4.1 Metal), =--check-state= passes as before (90,000 features read
 back, 45,000 picked), and a pick finds the same county. =--own-gl= clears a
 square between the counties and the chosen ones through a binding of its
 own, leaving its own array, texture unit and texture bound and no program:
-no pixel outside the square differs. The browser spike builds; its run in
-Chrome's WebGL2 is still to do.
+no pixel outside the square differs. In Chrome's WebGL2 (OpenGL ES 3.0
+Chromium), with no =glow= in =spike-web=: the counties draw, C's state check
+passes as natively, a click picks and selects a county, H hovers it, both
+rasters draw (the continuous one filtered smoothly, so =from_webgl2= still
+turns on =OES_texture_float_linear=), and under F a hidden county picks
+nothing while a shown one picks. The console shows no errors.
 
 About an hour of work, most of it the signature change and the spikes.
 
