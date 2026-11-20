@@ -4,12 +4,13 @@
 
 * Custom Symbols
 
-** STATUS -- proposal, written 2026-11-19
-Nothing here is decided but what § OPEN QUESTIONS marks so. § DESIGN is the
-recommendation, § OPEN QUESTIONS lists what needs a decision, and § STEPS
-builds it one kind of symbol at a
-time. Markers, dashes and pattern fills are three parts that share an atlas
-and a palette layout, so each can ship once the shared step is in.
+** STATUS -- steps 0 to 6 decided 2026-11-20 (user decision), building
+Written 2026-11-19 as a proposal. § OPEN QUESTIONS 1 to 6 are decided, and
+steps 0 to 6 are being built for 0.3.0. Step 7, vector symbols, waits on
+§ OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
+symbol at a time. Markers, dashes and pattern fills are three parts that
+share an atlas and a palette layout, so each can be built once the shared
+step is in.
 
 ** THE PROBLEM
 A style class draws one of three looks (plans/rendering.org § STYLING): a
@@ -395,6 +396,10 @@ Ruled out:
    spike measures both (§ CHECKS).
 
 ** STEPS
+0. *Nazca's own GL context* (plans/gl-context.org § STEP 1), first, so the
+   =gl= code below takes =&gl::Context= from the start. It breaks every =gl=
+   signature, and 0.3.0 breaks anyway (§ OPEN QUESTIONS 6), so the two
+   breaks ship as one.
 1. *Symbols and the palette.* The =symbol= module (=Symbol=, =Symbols=,
    shelf packing, =SymbolId=), =Style='s three fields, =#[non_exhaustive]=
    on =Style= and the new types, the 256 x 6 palette, =GpuSymbols=. Nothing
@@ -410,8 +415,9 @@ Ruled out:
 5. *=Symbol::from_svg=* behind the =symbols= feature (§ OPEN QUESTIONS 1).
 6. *The README* (a section on symbols: kinds, sizes, the guard band rule,
    how round ends lengthen dashes, what SVG output writes; its palette
-   example built from =Style::default()= by assignment) and *a release*,
-   0.3.0 as § OPEN QUESTIONS 6 says.
+   example built from =Style::default()= by assignment; its setup building
+   a =gl::Context= in place of a =glow= one) and *a release*, 0.3.0 as
+   § OPEN QUESTIONS 6 says, its notes covering both breaks.
 7. *Later, vector symbols*: parts from path data (the parser and
    flattening) and from a =Sink=, literal and slot paint, the instanced
    symbol mesh, picking by shape, the caps, the antialiased edge as § OPEN
