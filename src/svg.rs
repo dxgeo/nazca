@@ -281,7 +281,7 @@ mod tests {
 
     fn palette() -> Palette {
         let mut p = Palette::new();
-        p.set(1, Style { fill: [1.0, 0.0, 0.0, 1.0], line: [0.0, 0.0, 1.0, 0.5], line_width: 2.0, point_size: 6.0 });
+        p.set(1, Style { fill: [1.0, 0.0, 0.0, 1.0], line: [0.0, 0.0, 1.0, 0.5], line_width: 2.0, point_size: 6.0, ..Style::default() });
         p
     }
 

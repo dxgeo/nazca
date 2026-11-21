@@ -238,6 +238,12 @@ read by =texelFetch=; =update_palette= restyles in one upload. Visibility
 and min/max zoom are the embedder's for now: it chooses which layers to
 draw.
 
+/Symbols, 2026-11-21 (unreleased, for 0.3.0):/ =Style= gains a marker, a
+dash and a pattern, each naming a symbol by id from a =Symbols= atlas
+(=src/symbol.rs=), and is =#[non_exhaustive]=: an embedder builds one from
+=Style::default()= and assigns. The palette texture is 256 x 7. The design
+and what draws them is plans/custom-symbols.org.
+
 /Zoom-dependent values, 2026-10-30:/ a =circle-radius= can follow
 =["interpolate", ["linear"], ["zoom"], 3, 1, 10, 5]=. =style::interpolate(stops,
 base, zoom)= evaluates MapLibre's linear and exponential curves, and

@@ -321,7 +321,12 @@ pub fn check_state(gl: &Context, renderer: &Renderer, size: [u32; 2]) -> Result<
     let count = (GRID * GRID) as usize;
     let camera = Camera::new([0.0, 0.0], 2.0 / size[0].min(size[1]) as f64, size);
     let mut palette = Palette::new();
-    palette.set(1, Style { fill: [1.0, 0.0, 0.0, 1.0], line: [1.0, 0.0, 0.0, 1.0], line_width: 6.0, point_size: 8.0 });
+    let mut style = Style::default();
+    style.fill = [1.0, 0.0, 0.0, 1.0];
+    style.line = [1.0, 0.0, 0.0, 1.0];
+    style.line_width = 6.0;
+    style.point_size = 8.0;
+    palette.set(1, style);
     let palette = renderer.palette(gl, &palette)?;
     let pattern = |n: usize| u8::from(n.is_multiple_of(7)) | u8::from(n.is_multiple_of(11)) << 1;
     let flags: Vec<u8> = (0..count).map(pattern).collect();

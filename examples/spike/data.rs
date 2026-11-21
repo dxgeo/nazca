@@ -130,16 +130,25 @@ pub fn palette() -> Palette {
     ];
     let mut p = Palette::new();
     for (i, fill) in FILLS.into_iter().enumerate() {
-        p.set(1 + i as u8, Style { fill, line: [0.25, 0.27, 0.30, 1.0], line_width: 1.25, point_size: 0.0 });
+        p.set(1 + i as u8, outlined(fill, [0.25, 0.27, 0.30, 1.0], 1.25));
     }
     p
+}
+
+/// A fill with an outline, and no points.
+fn outlined(fill: [f32; 4], line: [f32; 4], line_width: f32) -> Style {
+    let mut style = Style::default();
+    style.fill = fill;
+    style.line = line;
+    style.line_width = line_width;
+    style
 }
 
 /// The look of a chosen county, in every class the counties use.
 pub fn highlight(fill: [f32; 4], line: [f32; 4], line_width: f32) -> Palette {
     let mut p = Palette::new();
     for class in 1..=6 {
-        p.set(class, Style { fill, line, line_width, point_size: 0.0 });
+        p.set(class, outlined(fill, line, line_width));
     }
     p
 }

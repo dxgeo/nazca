@@ -8,22 +8,119 @@
 //!
 //! Colours are RGBA in 0..1 with straight (not premultiplied) alpha, as
 //! written into an ordinary framebuffer; opacity is the alpha.
+//!
+//! A class can also draw with symbols (`../plans/custom-symbols.org`): a
+//! [`Marker`] in place of a point's dot, a [`Dash`] pattern on its lines and
+//! outlines, a [`Pattern`] in place of its flat fill. They name a symbol by
+//! [`SymbolId`], so restyling a class's markers uploads no image.
+//!
+//! [`Style`] and these types are `#[non_exhaustive]`, so a field added later
+//! breaks no one: start from [`Style::default`] (which draws nothing),
+//! [`Marker::new`], [`Dash::new`] or [`Pattern::new`] and assign the fields
+//! wanted.
+
+use crate::symbol::{SymbolId, Symbols};
 
 /// How many style classes a palette holds: a class is a `u8`.
 pub const CLASSES: usize = 256;
 
+/// The most on and off lengths a [`Dash`] holds.
+pub const DASH_LENGTHS: usize = 8;
+
 /// The look of one style class.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Style {
-    /// Polygon interiors.
+    /// Polygon interiors, and a mask symbol's tint.
     pub fill: [f32; 4],
     /// Polygon outlines and lines.
     pub line: [f32; 4],
     /// Line width in pixels; 0 draws no line.
     pub line_width: f32,
-    /// A point's diameter in pixels, drawn as a dot in the fill colour; 0
-    /// draws no point.
+    /// A point's diameter in pixels, drawn as a dot in the fill colour, or
+    /// its marker's longest side; 0 draws no point.
     pub point_size: f32,
+    /// A symbol drawn at each point in place of the dot.
+    pub marker: Option<Marker>,
+    /// Dashes on lines and polygon outlines.
+    pub dash: Option<Dash>,
+    /// A repeated symbol in place of the flat fill.
+    pub pattern: Option<Pattern>,
+}
+
+/// What a marker's rotation is against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Align {
+    /// The screen: the marker keeps its rotation as the camera turns.
+    #[default]
+    Screen,
+    /// The map: the marker turns as the camera turns, as a north arrow does.
+    Map,
+}
+
+/// A symbol drawn at a point, its longest side the class's `point_size`. A
+/// mask marker takes the class's `fill` colour.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Marker {
+    pub symbol: SymbolId,
+    /// Degrees clockwise, as a camera's bearing grows.
+    pub rotation: f32,
+    pub align: Align,
+}
+
+impl Marker {
+    /// `symbol` upright on the screen.
+    pub fn new(symbol: SymbolId) -> Marker {
+        Marker { symbol, rotation: 0.0, align: Align::Screen }
+    }
+}
+
+/// On and off lengths in pixels, repeated along a line from `phase` pixels
+/// into the pattern. An on length of 0 is a dot. An odd number of lengths
+/// repeats twice to make an even one, as in SVG.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Dash {
+    lengths: [f32; DASH_LENGTHS],
+    count: u8,
+    pub phase: f32,
+}
+
+impl Dash {
+    /// `None` for no lengths or more than [`DASH_LENGTHS`], a length that is
+    /// negative or not finite, lengths that sum to 0, or a phase that is not
+    /// finite.
+    pub fn new(lengths: &[f32], phase: f32) -> Option<Dash> {
+        let ok = |l: &f32| l.is_finite() && *l >= 0.0;
+        if lengths.is_empty() || lengths.len() > DASH_LENGTHS || !lengths.iter().all(ok) || lengths.iter().sum::<f32>() <= 0.0 || !phase.is_finite() {
+            return None;
+        }
+        let mut all = [0.0; DASH_LENGTHS];
+        all[..lengths.len()].copy_from_slice(lengths);
+        Some(Dash { lengths: all, count: lengths.len() as u8, phase })
+    }
+
+    /// The lengths, on first.
+    pub fn lengths(&self) -> &[f32] {
+        &self.lengths[..self.count as usize]
+    }
+}
+
+/// A symbol repeated over a fill, anchored to the map, one repeat's longest
+/// side `repeat` pixels at every zoom. A mask pattern takes the class's
+/// `fill` colour.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pattern {
+    pub symbol: SymbolId,
+    pub repeat: f32,
+}
+
+impl Pattern {
+    pub fn new(symbol: SymbolId, repeat: f32) -> Pattern {
+        Pattern { symbol, repeat }
+    }
 }
 
 /// A style per class. Classes never set are [`Style::default`]: nothing
@@ -55,6 +152,19 @@ impl Palette {
     /// All [`CLASSES`] styles, in class order.
     pub fn styles(&self) -> &[Style] {
         &self.styles
+    }
+
+    /// The classes that draw a symbol larger than [`crate::Symbol::sharp_px`],
+    /// which blurs: as a marker of their `point_size` or a pattern of its
+    /// `repeat`. An embedder adds such a symbol again at a larger size. A
+    /// symbol not in `symbols` draws nothing and is not named.
+    pub fn blurred(&self, symbols: &Symbols) -> Vec<u8> {
+        let past = |id: SymbolId, size: f32| symbols.get(id).is_some_and(|s| size > s.sharp_px());
+        let classes = self.styles.iter().enumerate();
+        classes
+            .filter(|(_, s)| s.marker.is_some_and(|m| past(m.symbol, s.point_size)) || s.pattern.is_some_and(|p| past(p.symbol, p.repeat)))
+            .map(|(class, _)| class as u8)
+            .collect()
     }
 }
 
@@ -150,6 +260,36 @@ mod tests {
         let s = Style { fill: [1.0, 0.0, 0.0, 1.0], line_width: 2.0, ..Style::default() };
         p.set(200, s);
         assert_eq!(*p.get(200), s);
+    }
+
+    #[test]
+    fn dashes_hold_what_they_were_given() {
+        let d = Dash::new(&[4.0, 2.0, 0.0, 2.0], 1.5).unwrap();
+        assert_eq!(d.lengths(), &[4.0, 2.0, 0.0, 2.0]);
+        assert_eq!(d.phase, 1.5);
+        assert!(Dash::new(&[1.0; DASH_LENGTHS], 0.0).is_some());
+        assert_eq!(Dash::new(&[1.0; DASH_LENGTHS + 1], 0.0), None);
+        assert_eq!(Dash::new(&[], 0.0), None);
+        assert_eq!(Dash::new(&[2.0, -1.0], 0.0), None);
+        assert_eq!(Dash::new(&[0.0, 0.0], 0.0), None);
+        assert_eq!(Dash::new(&[f32::INFINITY], 0.0), None);
+        assert_eq!(Dash::new(&[1.0], f32::NAN), None);
+    }
+
+    #[test]
+    fn a_palette_names_classes_drawing_a_symbol_past_its_pixels() {
+        let mut symbols = Symbols::new();
+        let mut pin = crate::Symbol::new(32, 48, vec![0; 32 * 48 * 4]).unwrap();
+        pin.scale = 2.0;
+        let pin = symbols.add(pin).unwrap();
+        let mut p = Palette::new();
+        let marker = Style { marker: Some(Marker::new(pin)), point_size: 24.0, ..Style::default() };
+        p.set(1, marker);
+        p.set(2, Style { point_size: 25.0, ..marker });
+        p.set(3, Style { pattern: Some(Pattern::new(pin, 30.0)), ..Style::default() });
+        assert_eq!(p.blurred(&symbols), vec![2, 3]);
+        symbols.remove(pin);
+        assert_eq!(p.blurred(&symbols), Vec::<u8>::new());
     }
 
     #[test]

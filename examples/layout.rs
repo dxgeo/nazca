@@ -52,7 +52,11 @@ fn main() {
         }
     }
     let mut basemap_style = Palette::new();
-    basemap_style.set(1, Style { fill: [0.91, 0.89, 0.85, 1.0], line: [0.72, 0.70, 0.63, 1.0], line_width: 0.8, point_size: 0.0 });
+    let mut land = Style::default();
+    land.fill = [0.91, 0.89, 0.85, 1.0];
+    land.line = [0.72, 0.70, 0.63, 1.0];
+    land.line_width = 0.8;
+    basemap_style.set(1, land);
     svg.begin_layer();
     svg.draw(&basemap.finish(), &camera, &basemap_style);
 

@@ -21,6 +21,11 @@
 //!   one-pixel antialiased edge. That draws round caps and round joins with
 //!   no neighbour information, and widths stay right at every zoom. Points
 //!   are the same quads around a segment of no length: dots.
+//! - *Symbols* are one atlas texture and a table of where each id lies in
+//!   it ([`GpuSymbols`]). A palette names a symbol by id, so a repack
+//!   touches no palette. The atlas is mipmapped to level 2, which its 4
+//!   pixels of padding keep from averaging two symbols together
+//!   ([`crate::symbol`]).
 //! - *Rasters* are drawn over their [`RasterMesh`], the band coloured in the
 //!   shader through a [`Colormap`] texture.
 //! - *Picking* draws feature ids instead of colours into a one-pixel integer
@@ -51,7 +56,8 @@ use crate::camera::Camera;
 use crate::grid::TileFrame;
 use crate::prepare::Mesh;
 use crate::raster::{Band, Raster, RasterMesh};
-use crate::style::{CLASSES, Colormap, Palette};
+use crate::style::{Align, CLASSES, Colormap, DASH_LENGTHS, Palette, Style};
+use crate::symbol::{Kind, PADDING, SymbolId, Symbols};
 use glow::HasContext;
 use std::collections::HashMap;
 #[cfg(any(not(target_family = "wasm"), target_os = "emscripten"))]
@@ -66,6 +72,10 @@ const SEGMENT_BYTES: usize = 24;
 /// Features a row of a state texture; `STATE_VS` wraps on the same number.
 /// OpenGL 3.3 guarantees textures this wide.
 const STATE_ROW: usize = 1024;
+/// Rows of a palette texture (`palette_texels`).
+const PALETTE_ROWS: i32 = 7;
+/// Symbol ids a row of the symbol table; each takes two texels.
+const SYMBOL_ROW: usize = 256;
 
 // Prepended to a vertex shader for a state draw. Ids wrap as `uint`s, so a
 // span may run past the top of the range; any id outside it holds no state.
@@ -411,10 +421,20 @@ pub struct GpuRaster {
     bytes: usize,
 }
 
-/// A [`Palette`] as a lookup texture: 256 x 3 RGBA32F, a column per class,
-/// rows fill colour, line colour, then line width and point size.
+/// A [`Palette`] as a lookup texture: 256 x 7 RGBA32F, a column per class,
+/// rows fill colour, line colour, line width and point size, marker, two of
+/// dash lengths, and pattern (`palette_texels`).
 pub struct GpuPalette {
     texture: glow::Texture,
+}
+
+/// [`Symbols`] on the GPU: the atlas as an RGBA8 texture mipmapped to level
+/// 2, and an RGBA32F table, 512 wide, of two texels an id: its rectangle in
+/// atlas pixels, then its anchor and kind. [`GpuSymbols::free`] releases it.
+pub struct GpuSymbols {
+    atlas: glow::Texture,
+    table: glow::Texture,
+    bytes: usize,
 }
 
 /// A [`Colormap`] as a 256 x 1 RGBA8 lookup texture.
@@ -484,6 +504,22 @@ impl GpuPalette {
         let gl = &gl.raw;
         // SAFETY: deletes the palette's own texture.
         unsafe { gl.delete_texture(self.texture) }
+    }
+}
+
+impl GpuSymbols {
+    /// The GPU memory it holds.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn free(self, gl: &Context) {
+        let gl = &gl.raw;
+        // SAFETY: deletes the symbols' own textures.
+        unsafe {
+            gl.delete_texture(self.atlas);
+            gl.delete_texture(self.table);
+        }
     }
 }
 
@@ -682,8 +718,8 @@ impl Renderer {
 
     pub fn palette(&self, gl: &Context, palette: &Palette) -> Result<GpuPalette, String> {
         let gl = &gl.raw;
-        // SAFETY: a texture of its own, filled from a local of 256 x 3 texels.
-        let texture = unsafe { texture(gl, glow::RGBA32F, CLASSES as i32, 3, glow::RGBA, glow::FLOAT, &palette_texels(palette), false)? };
+        // SAFETY: a texture of its own, filled from a local of 256 x 7 texels.
+        let texture = unsafe { texture(gl, glow::RGBA32F, CLASSES as i32, PALETTE_ROWS, glow::RGBA, glow::FLOAT, &palette_texels(palette), false)? };
         Ok(GpuPalette { texture })
     }
 
@@ -696,8 +732,43 @@ impl Renderer {
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(gpu.texture));
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, CLASSES as i32, 3, glow::RGBA, glow::FLOAT, glow::PixelUnpackData::Slice(Some(&texels)));
+            gl.tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, CLASSES as i32, PALETTE_ROWS, glow::RGBA, glow::FLOAT, glow::PixelUnpackData::Slice(Some(&texels)));
         }
+    }
+
+    /// Uploads `symbols`' atlas and the table of where each id lies in it.
+    pub fn symbols(&self, gl: &Context, symbols: &Symbols) -> Result<GpuSymbols, String> {
+        let gl = &gl.raw;
+        let side = symbols.atlas_side() as i32;
+        let (rows, table) = symbol_table_texels(symbols);
+        // SAFETY: textures of their own, filled from the atlas of `side`
+        // squared RGBA8 pixels and a local of `2 * SYMBOL_ROW * rows` texels.
+        unsafe {
+            let atlas = texture(gl, glow::RGBA8, side, side, glow::RGBA, glow::UNSIGNED_BYTE, symbols.atlas(), true)?;
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, PADDING.ilog2() as i32);
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            let table = match texture(gl, glow::RGBA32F, 2 * SYMBOL_ROW as i32, rows as i32, glow::RGBA, glow::FLOAT, &table, false) {
+                Ok(table) => table,
+                Err(e) => {
+                    gl.delete_texture(atlas);
+                    return Err(e);
+                }
+            };
+            // Level 0 and the two mipmaps below it, then the table.
+            let texels = (side * side) as usize;
+            let bytes = 4 * (texels + texels / 4 + texels / 16) + 2 * SYMBOL_ROW * rows * 16;
+            Ok(GpuSymbols { atlas, table, bytes })
+        }
+    }
+
+    /// Uploads `symbols` again into `gpu`, after an add or a remove. The
+    /// atlas may have grown, so both textures are made anew. No palette or
+    /// tile is touched.
+    pub fn update_symbols(&self, gl: &Context, gpu: &mut GpuSymbols, symbols: &Symbols) -> Result<(), String> {
+        let new = self.symbols(gl, symbols)?;
+        std::mem::replace(gpu, new).free(gl);
+        Ok(())
     }
 
     /// Uploads feature flags: `flags[i]` belongs to feature id `first + i`,
@@ -1160,12 +1231,58 @@ fn state_texels(flags: &[u8]) -> Vec<u8> {
     texels
 }
 
-/// The palette's texels: a row of fill colours, a row of line colours, a
-/// row of (line width, point size, 0, 0).
+/// The palette's texels, a row each of:
+///
+/// 0. fill colours,
+/// 1. line colours,
+/// 2. (line width, point size, 0, 0),
+/// 3. markers: (symbol, rotation in degrees, 1 against the map or 0 the
+///    screen, 0),
+/// 4. and 5. dash lengths, four each, 0 past the dash's count,
+/// 6. patterns: (symbol, repeat, dash phase, dash count).
+///
+/// A symbol is its id + 1, so 0 is none and a default style is all zeros;
+/// an `f32` holds every id exactly.
 fn palette_texels(palette: &Palette) -> Vec<u8> {
     let s = palette.styles();
-    let rows = s.iter().map(|s| s.fill).chain(s.iter().map(|s| s.line)).chain(s.iter().map(|s| [s.line_width, s.point_size, 0.0, 0.0]));
-    rows.flat_map(|t| f32_bytes(&t)).collect()
+    (0..PALETTE_ROWS as usize).flat_map(|row| s.iter().flat_map(move |s| f32_bytes(&palette_texel(s, row)))).collect()
+}
+
+/// One class's texel in `row` of the palette.
+fn palette_texel(s: &Style, row: usize) -> [f32; 4] {
+    let symbol = |id: SymbolId| id.0 as f32 + 1.0;
+    let mut lengths = [0.0; DASH_LENGTHS];
+    if let Some(d) = s.dash {
+        lengths[..d.lengths().len()].copy_from_slice(d.lengths());
+    }
+    match row {
+        0 => s.fill,
+        1 => s.line,
+        2 => [s.line_width, s.point_size, 0.0, 0.0],
+        3 => s.marker.map_or([0.0; 4], |m| [symbol(m.symbol), m.rotation, (m.align == Align::Map) as u8 as f32, 0.0]),
+        4 | 5 => std::array::from_fn(|i| lengths[(row - 4) * 4 + i]),
+        _ => {
+            let (id, repeat) = s.pattern.map_or((0.0, 0.0), |p| (symbol(p.symbol), p.repeat));
+            let (phase, count) = s.dash.map_or((0.0, 0.0), |d| (d.phase, d.lengths().len() as f32));
+            [id, repeat, phase, count]
+        }
+    }
+}
+
+/// The symbol table's rows and texels: id `n` at column `2 * (n % 256)` of
+/// row `n / 256`, as (x, y, width, height) in atlas pixels, then (anchor x,
+/// anchor y, 1 for a mask or 0 for colour, 0). An id not held is all zeros,
+/// so has no width. As many rows as the highest id held needs, and at least
+/// one.
+fn symbol_table_texels(symbols: &Symbols) -> (usize, Vec<u8>) {
+    let rows = symbols.iter().last().map_or(1, |(id, _, _)| id.0 as usize / SYMBOL_ROW + 1);
+    let mut texels = vec![0.0f32; rows * SYMBOL_ROW * 8];
+    for (id, symbol, r) in symbols.iter() {
+        let mask = (symbol.kind == Kind::Mask) as u8 as f32;
+        let at = id.0 as usize * 8;
+        texels[at..at + 8].copy_from_slice(&[r.x as f32, r.y as f32, r.width as f32, r.height as f32, symbol.anchor[0], symbol.anchor[1], mask, 0.0]);
+    }
+    (rows, f32_bytes(&texels))
 }
 
 fn f32_bytes(v: &[f32]) -> Vec<u8> {
@@ -1175,6 +1292,64 @@ fn f32_bytes(v: &[f32]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn texel(texels: &[u8], width: usize, x: usize, y: usize) -> [f32; 4] {
+        let at = (y * width + x) * 16;
+        std::array::from_fn(|i| f32::from_ne_bytes(texels[at + i * 4..at + i * 4 + 4].try_into().unwrap()))
+    }
+
+    #[test]
+    fn palette_texels_hold_a_row_each() {
+        let mut symbols = Symbols::new();
+        let pin = symbols.add(crate::Symbol::new(1, 1, vec![0; 4]).unwrap()).unwrap();
+        let hatch = symbols.add(crate::Symbol::new(1, 1, vec![0; 4]).unwrap()).unwrap();
+        let mut palette = Palette::new();
+        let s = Style {
+            fill: [0.1, 0.2, 0.3, 0.4],
+            line_width: 2.0,
+            point_size: 6.0,
+            marker: Some(crate::Marker { rotation: 45.0, align: Align::Map, ..crate::Marker::new(pin) }),
+            dash: crate::Dash::new(&[4.0, 2.0, 0.0, 2.0, 1.0], 3.0),
+            pattern: Some(crate::Pattern::new(hatch, 12.0)),
+            ..Style::default()
+        };
+        palette.set(9, s);
+        let texels = palette_texels(&palette);
+        assert_eq!(texels.len(), CLASSES * PALETTE_ROWS as usize * 16);
+        let at = |row| texel(&texels, CLASSES, 9, row);
+        assert_eq!(at(0), [0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(at(2), [2.0, 6.0, 0.0, 0.0]);
+        assert_eq!(at(3), [1.0, 45.0, 1.0, 0.0]);
+        assert_eq!(at(4), [4.0, 2.0, 0.0, 2.0]);
+        assert_eq!(at(5), [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(at(6), [2.0, 12.0, 3.0, 5.0]);
+        // A default style is all zeros: no marker, no dash, no pattern.
+        assert!((0..PALETTE_ROWS as usize).all(|row| texel(&texels, CLASSES, 8, row) == [0.0; 4]));
+    }
+
+    #[test]
+    fn the_symbol_table_grows_by_rows_of_256_ids() {
+        let mut symbols = Symbols::new();
+        assert_eq!(symbol_table_texels(&symbols).0, 1);
+        let mut first = crate::Symbol::new(3, 5, vec![0; 60]).unwrap();
+        first.anchor = [0.5, 1.0];
+        first.kind = Kind::Mask;
+        let first = symbols.add(first).unwrap();
+        for _ in 0..SYMBOL_ROW {
+            let id = symbols.add(crate::Symbol::new(1, 1, vec![0; 4]).unwrap()).unwrap();
+            symbols.remove(id);
+        }
+        let last = symbols.add(crate::Symbol::new(1, 1, vec![0; 4]).unwrap()).unwrap();
+        assert_eq!(last.0 as usize, SYMBOL_ROW + 1);
+        let (rows, texels) = symbol_table_texels(&symbols);
+        assert_eq!((rows, texels.len()), (2, 2 * SYMBOL_ROW * 2 * 16));
+        let r = symbols.rect(first).unwrap();
+        assert_eq!(texel(&texels, 2 * SYMBOL_ROW, 0, 0), [r.x as f32, r.y as f32, 3.0, 5.0]);
+        assert_eq!(texel(&texels, 2 * SYMBOL_ROW, 1, 0), [0.5, 1.0, 1.0, 0.0]);
+        // A removed id has no width; the last sits in row 1, column 2.
+        assert_eq!(texel(&texels, 2 * SYMBOL_ROW, 2, 0), [0.0; 4]);
+        assert_eq!(texel(&texels, 2 * SYMBOL_ROW, 2, 1)[2], 1.0);
+    }
 
     #[test]
     fn state_texels_fill_whole_rows() {
