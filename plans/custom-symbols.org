@@ -189,6 +189,18 @@ Measured against =src/= at 0.2.1:
   as tall as the highest id's row: a row of 8 KB for a few hundred ids,
   2 MB at most, and never past WebGL2's texture limit as a row of 65,536
   would be.
+- *The renderer holds the atlas.* Decided 2026-11-21 (user decision).
+  =Renderer::set_symbols(gl, &Symbols)= uploads it, after the embedder adds
+  or removes symbols, and every draw and pick uses it with no argument of
+  its own; a renderer starts with an empty atlas, so an embedder without
+  symbols calls nothing. It is how =SvgWriter::symbols= works (§ SVG
+  output). One atlas a renderer: two maps sharing a GL context share one
+  =Symbols=. =GpuSymbols= (built in step 1, unreleased) becomes the
+  renderer's own. Ruled out: a =&GpuSymbols= argument on every draw, which
+  grows four signatures and makes an embedder without symbols upload an
+  empty atlas to pass; and a palette uploaded with its atlas, which would
+  hold copies of the atlas's GL names, so a palette outliving its atlas
+  could sample whatever texture GL gave those names next.
 
 Ruled out:
 - *Symbols in the palette itself.* A class would carry its own pixels, so
@@ -218,7 +230,7 @@ Ruled out:
   is whole only when its reach is within the guard band and the
   neighbour's source holds the point too. Nazca checks the first: a
   palette whose markers reach past the guard band is an error naming the
-  class and the size. The reach is measured from the anchor, not the
+  class and the size, from a check the embedder calls (below). The reach is measured from the anchor, not the
   centre, and at the marker's worst rotation: a pin anchored at its tip
   reaches its whole height above the point, and a marker that turns with
   the map reaches as far as its anchor's farthest corner in every
@@ -226,6 +238,31 @@ Ruled out:
   anchored at its centre). A marker rotated against the screen has one
   rotation, and is checked at it. The second is the embedder's, as it is
   for lines now, and the README says so.
+- *The check is against half the guard band.* Decided 2026-11-21 (user
+  decision). The guard band is in the tile's own pixels, and the flat
+  selector shows a level's tiles from their own size down to half of it
+  just before the next coarser level takes over (=level_for_resolution=),
+  while a marker's size is in screen pixels and doesn't shrink. So a
+  32-pixel guard band is 16 on screen over half the zoom range, and a
+  marker reaching further is cut at some zooms. Checked against half, a
+  marker is whole at every zoom. With the default =guard_px= of 32 that
+  allows a marker upright and centred up to 32 pixels, one turning with the
+  map up to 22, and a pin anchored at its tip 16 tall; the error names the
+  class, its size and the =guard_px= it needs, and an embedder wanting
+  larger markers raises =guard_px= in its own =Detail=. The default stays,
+  so a map without markers keeps no more geometry. Ruled out: raising the
+  default, which costs every embedder clipped geometry past each tile's
+  edge, unmeasured; and checking against the whole guard band, which cuts
+  markers over half the zoom range.
+- *The embedder calls the check.* Decided 2026-11-21 (user decision).
+  =Palette::check_reach(&Symbols, guard_px)= returns the error, standard
+  library only, as =Palette::blurred= answers its question: it is the one
+  place that sees the palette's sizes, the symbols' shapes and anchors, and
+  the guard band together. An embedder that doesn't call it gets cut
+  markers, not an error; the spike and the README call it. Ruled out:
+  checking at palette upload, which can't check a palette uploaded before
+  the symbols it names, needs the smallest =guard_px= of every layer the
+  palette styles, and gives every embedder's =update_palette= a =Result=.
 - *No decluttering.* Markers overlap where their points do, drawn in
   feature order. Hiding markers that collide is the placement problem of
   plans/rendering.org § LABELS and belongs with it.
