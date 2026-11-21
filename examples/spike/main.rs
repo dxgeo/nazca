@@ -4,8 +4,8 @@
 //! window over an OpenGL 3.3 core context. Drag to pan, scroll to zoom about
 //! the cursor, right-drag to rotate about the window's centre, click to pick
 //! a county and toggle its selection, press H to toggle a hover state on the
-//! county picked last, press F to show every other county, and press R to
-//! cycle the raster overlay.
+//! county picked last, press F to show every other county, press M to cycle
+//! the markers, and press R to cycle the raster overlay.
 //!
 //!   cargo run -p nazca --features gl --example spike
 //!   cargo run -p nazca --features gl --example spike -- --screenshot out.png
@@ -23,12 +23,17 @@
 //! synthetic grid of features drawn by state, reports and exits. `--own-gl`
 //! makes GL calls of the spike's own between two of nazca's layers, through
 //! a `glow` binding of its own over the same context, as an embedder drawing
-//! something of its own would: a square in the top left corner.
+//! something of its own would: a square in the top left corner. `--markers`
+//! (`colour` or `mask`) opens with the counties' markers, as M cycles them.
+//! `--check-markers` checks the guard band check and picking a marker by its
+//! image, reports and exits. `--centre NAME` centres the view on that
+//! county's marker, and `--level Z` sets the zoom to MapLibre's zoom `Z`
+//! (the grid's level, fractional), as a tile-edge check aims a view.
 
 mod data;
 mod tiles;
 
-use data::Overlay;
+use data::{Markers, Overlay};
 use glutin::config::{ConfigTemplateBuilder, GlConfig};
 use glutin::context::{ContextApi, ContextAttributesBuilder, GlProfile, NotCurrentGlContext, PossiblyCurrentContext, Version};
 use glutin::display::{GetGlDisplay, GlDisplay};
@@ -114,6 +119,10 @@ struct Options {
     own_gl: bool,
     svg: Option<String>,
     zoom: f64,
+    markers: Markers,
+    check_markers: bool,
+    centre: Option<String>,
+    level: Option<f64>,
 }
 
 struct App {
@@ -144,6 +153,19 @@ impl App {
             self.options.filter = false;
             g.map.set_filter(&g.gl, &g.renderer, true);
         }
+        if self.options.markers != Markers::None {
+            g.map.set_markers(&g.gl, &g.renderer, std::mem::replace(&mut self.options.markers, Markers::None));
+        }
+        if self.options.check_markers {
+            match tiles::check_markers(&mut g.map, &g.gl, &g.renderer, camera) {
+                Ok(report) => println!("{report}"),
+                Err(e) => {
+                    eprintln!("marker check failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
         let stats = g.draw(camera);
         if stats.prepared > 0 {
             println!(
@@ -156,11 +178,11 @@ impl App {
             );
         }
         if let Some(px) = self.options.pick.take() {
-            report(g.map.pick(&g.gl, &g.renderer, camera, px), px);
+            report(g.map.pick(&g.gl, &g.renderer, camera, px).as_ref(), px);
         }
         for (px, bit) in std::mem::take(&mut self.options.states) {
             let pick = g.map.pick(&g.gl, &g.renderer, camera, px);
-            report(pick, px);
+            report(pick.as_ref(), px);
             if let Some((_, id)) = pick {
                 g.map.toggle(&g.gl, &g.renderer, id, bit);
             }
@@ -192,9 +214,9 @@ impl App {
     }
 }
 
-fn report(pick: Option<(&str, u32)>, px: [f64; 2]) {
+fn report(pick: Option<&(String, u32)>, px: [f64; 2]) {
     match pick {
-        Some((name, id)) => println!("picked {name} County (feature {id}) at {px:?}"),
+        Some((name, id)) => println!("picked {name} (feature {id}) at {px:?}"),
         None => println!("picked nothing at {px:?}"),
     }
 }
@@ -232,8 +254,8 @@ impl ApplicationHandler for App {
         };
         println!("GL: {}, stencil bits: {}", gl.version(), config.stencil_size());
 
-        let renderer = Renderer::new(&gl).unwrap();
-        let map = TiledMap::new(&gl, &renderer, 16 << 20, self.options.overlay);
+        let mut renderer = Renderer::new(&gl).unwrap();
+        let map = TiledMap::new(&gl, &mut renderer, 16 << 20, self.options.overlay);
 
         // Fit the counties, with a margin.
         let size = window.inner_size();
@@ -241,6 +263,13 @@ impl ApplicationHandler for App {
         camera.bearing = self.options.bearing.to_radians();
         camera.fit_bounds(map.bounds(), 0.04 * size.width.min(size.height) as f64);
         camera.zoom_about([size.width as f64 / 2.0, size.height as f64 / 2.0], self.options.zoom);
+        if let Some(name) = &self.options.centre {
+            camera.center = map.marker(name).unwrap_or_else(|| panic!("no county {name}"));
+        }
+        if let Some(z) = self.options.level {
+            // The 512-pixel Web Mercator grid's resolution at level `z`.
+            camera.units_per_px = std::f64::consts::TAU * 6_378_137.0 / 512.0 / 2f64.powf(z);
+        }
         self.camera = Some(camera);
         window.request_redraw();
         self.gfx = Some(Gfx { window, surface, context, gl, renderer, map, own });
@@ -264,7 +293,7 @@ impl ApplicationHandler for App {
                         if start.is_some_and(|s| (s.x - self.cursor.x).abs() + (s.y - self.cursor.y).abs() < 4.0) {
                             let px = [self.cursor.x, self.cursor.y];
                             let pick = g.map.pick(&g.gl, &g.renderer, camera, px);
-                            report(pick, px);
+                            report(pick.as_ref(), px);
                             if let Some((_, id)) = pick {
                                 g.map.toggle(&g.gl, &g.renderer, id, SELECTED);
                             }
@@ -300,6 +329,11 @@ impl ApplicationHandler for App {
                     println!("overlay: {next:?}");
                 }
                 Key::Character(c) if c.eq_ignore_ascii_case("h") => g.map.toggle_last(&g.gl, &g.renderer, HOVERED),
+                Key::Character(c) if c.eq_ignore_ascii_case("m") => {
+                    let next = g.map.markers().next();
+                    g.map.set_markers(&g.gl, &g.renderer, next);
+                    println!("markers: {next:?}");
+                }
                 Key::Character(c) if c.eq_ignore_ascii_case("f") => {
                     let on = !g.map.filtered();
                     g.map.set_filter(&g.gl, &g.renderer, on);
@@ -322,10 +356,25 @@ impl ApplicationHandler for App {
 
 fn main() {
     let usage = || -> ! {
-        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state] [--own-gl]");
+        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state] [--own-gl] [--markers colour|mask] [--check-markers] [--centre NAME] [--level Z]");
         std::process::exit(2);
     };
-    let mut options = Options { screenshot: None, bearing: 0.0, overlay: Overlay::None, pick: None, states: Vec::new(), check_state: false, filter: false, own_gl: false, svg: None, zoom: 1.0 };
+    let mut options = Options {
+        screenshot: None,
+        bearing: 0.0,
+        overlay: Overlay::None,
+        pick: None,
+        states: Vec::new(),
+        check_state: false,
+        filter: false,
+        own_gl: false,
+        svg: None,
+        zoom: 1.0,
+        markers: Markers::None,
+        check_markers: false,
+        centre: None,
+        level: None,
+    };
     let mut args = std::env::args().skip(1);
     let point = |value: &str| -> [f64; 2] {
         let xy: Vec<f64> = value.split(',').map(|v| v.parse().unwrap_or_else(|_| usage())).collect();
@@ -345,6 +394,10 @@ fn main() {
             options.own_gl = true;
             continue;
         }
+        if flag == "--check-markers" {
+            options.check_markers = true;
+            continue;
+        }
         let value = args.next().unwrap_or_else(|| usage());
         match flag.as_str() {
             "--screenshot" => options.screenshot = Some(value),
@@ -358,6 +411,15 @@ fn main() {
                     _ => usage(),
                 }
             }
+            "--markers" => {
+                options.markers = match value.as_str() {
+                    "colour" => Markers::Colour,
+                    "mask" => Markers::Mask,
+                    _ => usage(),
+                }
+            }
+            "--centre" => options.centre = Some(value),
+            "--level" => options.level = Some(value.parse().unwrap_or_else(|_| usage())),
             "--pick" => options.pick = Some(point(&value)),
             "--select" => options.states.push((point(&value), SELECTED)),
             "--hover" => options.states.push((point(&value), HOVERED)),

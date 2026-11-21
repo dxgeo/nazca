@@ -19,13 +19,18 @@
 //!   shader: each segment is one instanced quad around it, and the fragment
 //!   shader keeps what lies within half the width of the segment, with a
 //!   one-pixel antialiased edge. That draws round caps and round joins with
-//!   no neighbour information, and widths stay right at every zoom. Points
-//!   are the same quads around a segment of no length: dots.
+//!   no neighbour information, and widths stay right at every zoom.
+//! - *Points* are an instanced quad each, drawn by one program: a round dot
+//!   in the fill colour, or, where the class has a [`crate::Marker`], its
+//!   symbol sized by the point size, placed by its anchor and turned against
+//!   the screen or the map. A layer mixing the two is one draw. A marker
+//!   picks where its image is at least half opaque, so a click on a pin's
+//!   transparent corner picks what lies under it.
 //! - *Symbols* are one atlas texture and a table of where each id lies in
-//!   it ([`GpuSymbols`]). A palette names a symbol by id, so a repack
-//!   touches no palette. The atlas is mipmapped to level 2, which its 4
-//!   pixels of padding keep from averaging two symbols together
-//!   ([`crate::symbol`]).
+//!   it, held by the renderer and set by [`Renderer::set_symbols`]. A
+//!   palette names a symbol by id, so a repack touches no palette. The atlas
+//!   is mipmapped to level 2, which its 4 pixels of padding keep from
+//!   averaging two symbols together ([`crate::symbol`]).
 //! - *Rasters* are drawn over their [`RasterMesh`], the band coloured in the
 //!   shader through a [`Colormap`] texture.
 //! - *Picking* draws feature ids instead of colours into a one-pixel integer
@@ -142,7 +147,6 @@ uniform mat4 u_matrix;
 uniform mat4 u_post;
 uniform vec2 u_viewport;
 uniform highp sampler2D u_palette;
-uniform int u_points;
 uniform float u_min_half;
 flat out vec2 v_a;
 flat out vec2 v_b;
@@ -162,9 +166,8 @@ void main() {
     }
 #endif
     int cls = int(a_class + 0.5);
-    vec4 sizes = texelFetch(u_palette, ivec2(cls, 2), 0);
-    float width = u_points != 0 ? sizes.y : sizes.x;
-    v_color = texelFetch(u_palette, ivec2(cls, u_points != 0 ? 0 : 1), 0);
+    float width = texelFetch(u_palette, ivec2(cls, 2), 0).x;
+    v_color = texelFetch(u_palette, ivec2(cls, 1), 0);
     v_half = width > 0.0 ? max(width * 0.5, u_min_half) : 0.0;
     vec2 a = to_px(a_p0);
     vec2 b = to_px(a_p1);
@@ -212,6 +215,146 @@ void main() {
     float cover = clamp(v_half + 0.5 - distance_to_segment(), 0.0, 1.0);
     if (cover <= 0.0) discard;
     o_color = vec4(v_color.rgb, v_color.a * cover);
+}
+#endif
+"#;
+
+// One instance a point, as for lines: a dot where its class has no marker,
+// the marker's symbol where it has one, so a layer mixing the two is one
+// draw. A marker's quad is its symbol's box, its longest side the point
+// size, placed by its anchor and turned by its rotation, plus a pixel on
+// every side for the atlas's transparent padding to soften the edge.
+const MARKER_VS: &str = r#"
+layout(location = 0) in vec2 a_pos;
+layout(location = 2) in float a_class;
+layout(location = 3) in uint a_id;
+uniform mat4 u_matrix;
+uniform mat4 u_post;
+uniform vec2 u_viewport;
+uniform highp sampler2D u_palette;
+uniform highp sampler2D u_table;
+uniform float u_min_half;
+flat out vec2 v_center;
+flat out float v_half;
+flat out vec4 v_color;
+flat out uint v_id;
+flat out int v_kind;
+flat out vec4 v_rect;
+out vec2 v_px;
+out vec2 v_uv;
+vec2 to_px(vec2 p) {
+    vec4 c = u_matrix * vec4(p, 0.0, 1.0);
+    return (c.xy / c.w * 0.5 + 0.5) * u_viewport;
+}
+void main() {
+#ifdef STATE
+    if (!has_state(a_id)) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
+#endif
+    int cls = int(a_class + 0.5);
+    float size = texelFetch(u_palette, ivec2(cls, 2), 0).y;
+    vec4 marker = texelFetch(u_palette, ivec2(cls, 3), 0);
+    v_color = texelFetch(u_palette, ivec2(cls, 0), 0);
+    v_id = a_id;
+    vec2 c = to_px(a_pos);
+    v_center = c;
+    vec2 corner = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
+    // The symbol's rectangle in the atlas, and its anchor and kind; a
+    // symbol the table doesn't hold has no width.
+    int id = int(marker.x + 0.5) - 1;
+    vec4 rect = vec4(0.0);
+    vec4 shape = vec4(0.0);
+    if (id >= 0 && id / 256 < textureSize(u_table, 0).y) {
+        ivec2 at = ivec2(2 * (id % 256), id / 256);
+        rect = texelFetch(u_table, at, 0);
+        shape = texelFetch(u_table, at + ivec2(1, 0), 0);
+    }
+    vec2 p;
+    if (rect.z > 0.0 && size > 0.0) {
+        vec2 box = rect.zw * (size / max(rect.z, rect.w));
+        vec2 grow = 1.0 / box;
+        // Fractions of the image, Y down, and their offset from the anchor
+        // in pixels, Y up.
+        vec2 u = mix(-grow, 1.0 + grow, corner);
+        vec2 off = vec2(u.x - shape.x, shape.y - u.y) * box;
+        float turn = radians(marker.y);
+        if (marker.z > 0.5) {
+            // Against the map: map north's direction on screen, clockwise
+            // from up.
+            vec2 north = (u_matrix * vec4(0.0, 1.0, 0.0, 0.0)).xy * u_viewport;
+            turn += atan(north.x, north.y);
+        }
+        float cs = cos(turn);
+        float sn = sin(turn);
+        p = c + vec2(off.x * cs + off.y * sn, off.y * cs - off.x * sn);
+        v_uv = rect.xy + u * rect.zw;
+        v_rect = rect;
+        v_kind = int(shape.z + 0.5);
+        v_half = 0.0;
+    } else {
+        v_half = id < 0 && size > 0.0 ? max(size * 0.5, u_min_half) : 0.0;
+        float r = v_half > 0.0 ? v_half + 1.0 : 0.0;
+        p = c + (corner * 2.0 - 1.0) * r;
+        v_uv = vec2(0.0);
+        v_rect = vec4(0.0);
+        v_kind = -1;
+    }
+    v_px = p;
+    gl_Position = u_post * vec4(p / u_viewport * 2.0 - 1.0, 0.0, 1.0);
+}
+"#;
+
+// v_kind: -1 a dot, 0 a colour symbol, 1 a mask. The atlas is premultiplied
+// (`crate::symbol`), so a colour sample is divided back to straight alpha.
+// The lookup is clamped a texel past the symbol's rectangle, inside its
+// padding, and its gradient taken before the clamp and the branch.
+const MARKER_FS: &str = r#"
+flat in vec2 v_center;
+flat in float v_half;
+flat in vec4 v_color;
+flat in uint v_id;
+flat in int v_kind;
+flat in vec4 v_rect;
+in vec2 v_px;
+in vec2 v_uv;
+uniform highp sampler2D u_atlas;
+vec4 sample_atlas(vec2 dx, vec2 dy) {
+    vec2 uv = clamp(v_uv, v_rect.xy - 1.0, v_rect.xy + v_rect.zw + 1.0);
+    return textureGrad(u_atlas, uv / vec2(textureSize(u_atlas, 0)), dx, dy);
+}
+#ifdef PICK
+uniform uint u_layer;
+out uvec4 o_pick;
+void main() {
+    vec2 size = vec2(textureSize(u_atlas, 0));
+    vec2 dx = dFdx(v_uv / size);
+    vec2 dy = dFdy(v_uv / size);
+    if (v_kind < 0) {
+        if (length(v_px - v_center) > v_half) discard;
+    } else if (sample_atlas(dx, dy).a < 0.5) {
+        discard;
+    }
+    o_pick = uvec4(u_layer, v_id, 1u, 0u);
+}
+#else
+out vec4 o_color;
+void main() {
+    vec2 size = vec2(textureSize(u_atlas, 0));
+    vec2 dx = dFdx(v_uv / size);
+    vec2 dy = dFdy(v_uv / size);
+    vec4 c;
+    if (v_kind < 0) {
+        float cover = clamp(v_half + 0.5 - length(v_px - v_center), 0.0, 1.0);
+        c = vec4(v_color.rgb, v_color.a * cover);
+    } else {
+        vec4 t = sample_atlas(dx, dy);
+        vec3 rgb = v_kind == 1 ? v_color.rgb : (t.a > 0.0 ? t.rgb / t.a : vec3(0.0));
+        c = vec4(rgb, t.a * v_color.a);
+    }
+    if (c.a <= 0.0) discard;
+    o_color = c;
 }
 #endif
 "#;
@@ -388,11 +531,16 @@ pub struct Renderer {
     line_pick: Program,
     line_state: Program,
     line_pick_state: Program,
+    marker: Program,
+    marker_pick: Program,
+    marker_state: Program,
+    marker_pick_state: Program,
     raster: Program,
     stencil: Program,
     square_vao: glow::VertexArray,
     square_vbo: glow::Buffer,
     float_linear: bool,
+    symbols: GpuSymbols,
 }
 
 /// A [`Mesh`] uploaded to the GPU. Nazca keeps no CPU copy once it is here
@@ -428,10 +576,10 @@ pub struct GpuPalette {
     texture: glow::Texture,
 }
 
-/// [`Symbols`] on the GPU: the atlas as an RGBA8 texture mipmapped to level
-/// 2, and an RGBA32F table, 512 wide, of two texels an id: its rectangle in
-/// atlas pixels, then its anchor and kind. [`GpuSymbols::free`] releases it.
-pub struct GpuSymbols {
+/// [`Symbols`] on the GPU, held by the [`Renderer`]: the atlas as an RGBA8
+/// texture mipmapped to level 2, and an RGBA32F table, 512 wide, of two
+/// texels an id: its rectangle in atlas pixels, then its anchor and kind.
+struct GpuSymbols {
     atlas: glow::Texture,
     table: glow::Texture,
     bytes: usize,
@@ -508,13 +656,32 @@ impl GpuPalette {
 }
 
 impl GpuSymbols {
-    /// The GPU memory it holds.
-    pub fn bytes(&self) -> usize {
-        self.bytes
+    /// Uploads `symbols`' atlas and the table of where each id lies in it.
+    fn new(gl: &glow::Context, symbols: &Symbols) -> Result<GpuSymbols, String> {
+        let side = symbols.atlas_side() as i32;
+        let (rows, table) = symbol_table_texels(symbols);
+        // SAFETY: textures of their own, filled from the atlas of `side`
+        // squared RGBA8 pixels and a local of `2 * SYMBOL_ROW * rows` texels.
+        unsafe {
+            let atlas = texture(gl, glow::RGBA8, side, side, glow::RGBA, glow::UNSIGNED_BYTE, symbols.atlas(), true)?;
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, PADDING.ilog2() as i32);
+            gl.generate_mipmap(glow::TEXTURE_2D);
+            let table = match texture(gl, glow::RGBA32F, 2 * SYMBOL_ROW as i32, rows as i32, glow::RGBA, glow::FLOAT, &table, false) {
+                Ok(table) => table,
+                Err(e) => {
+                    gl.delete_texture(atlas);
+                    return Err(e);
+                }
+            };
+            // Level 0 and the two mipmaps below it, then the table.
+            let texels = (side * side) as usize;
+            let bytes = 4 * (texels + texels / 4 + texels / 16) + 2 * SYMBOL_ROW * rows * 16;
+            Ok(GpuSymbols { atlas, table, bytes })
+        }
     }
 
-    pub fn free(self, gl: &Context) {
-        let gl = &gl.raw;
+    fn free(self, gl: &glow::Context) {
         // SAFETY: deletes the symbols' own textures.
         unsafe {
             gl.delete_texture(self.atlas);
@@ -553,7 +720,8 @@ impl Renderer {
         let state = format!("{header}#define STATE\n");
         let pick_state = format!("{header}#define PICK\n#define STATE\n");
         let fill_u = ["u_matrix", "u_post", "u_palette", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
-        let line_u = ["u_matrix", "u_post", "u_viewport", "u_palette", "u_points", "u_min_half", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
+        let line_u = ["u_matrix", "u_post", "u_viewport", "u_palette", "u_min_half", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
+        let marker_u = ["u_matrix", "u_post", "u_viewport", "u_palette", "u_table", "u_atlas", "u_min_half", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
         let raster_u = ["u_matrix", "u_post", "u_band", "u_ramp", "u_kind", "u_domain", "u_opacity", "u_has_nodata", "u_nodata"];
         let renderer = Renderer {
             fill: program(gl, header, FILL_VS, FILL_FS, &fill_u)?,
@@ -564,6 +732,10 @@ impl Renderer {
             line_pick: program(gl, &pick, LINE_VS, LINE_FS, &line_u)?,
             line_state: program(gl, &state, &format!("{STATE_VS}{LINE_VS}"), LINE_FS, &line_u)?,
             line_pick_state: program(gl, &pick_state, &format!("{STATE_VS}{LINE_VS}"), LINE_FS, &line_u)?,
+            marker: program(gl, header, MARKER_VS, MARKER_FS, &marker_u)?,
+            marker_pick: program(gl, &pick, MARKER_VS, MARKER_FS, &marker_u)?,
+            marker_state: program(gl, &state, &format!("{STATE_VS}{MARKER_VS}"), MARKER_FS, &marker_u)?,
+            marker_pick_state: program(gl, &pick_state, &format!("{STATE_VS}{MARKER_VS}"), MARKER_FS, &marker_u)?,
             raster: program(gl, header, RASTER_VS, RASTER_FS, &raster_u)?,
             stencil: program(gl, header, STENCIL_VS, STENCIL_FS, &["u_matrix", "u_post", "u_grow"])?,
             // SAFETY: creates and fills a buffer and array of its own; the
@@ -573,6 +745,7 @@ impl Renderer {
             // Desktop GL filters float textures linearly; WebGL2 only with
             // the extension (which glow enables when it is offered).
             float_linear: !embedded || gl.supported_extensions().contains("OES_texture_float_linear"),
+            symbols: GpuSymbols::new(gl, &Symbols::new())?,
         };
         let square: [f32; 8] = [-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
         // SAFETY: binds the square's own objects and copies from a local.
@@ -736,39 +909,20 @@ impl Renderer {
         }
     }
 
-    /// Uploads `symbols`' atlas and the table of where each id lies in it.
-    pub fn symbols(&self, gl: &Context, symbols: &Symbols) -> Result<GpuSymbols, String> {
+    /// Uploads the symbols every draw and pick takes markers from, in place
+    /// of the last ones set; a renderer starts with none. Call it after
+    /// adding or removing symbols. No palette or tile is touched: palettes
+    /// name symbols by id.
+    pub fn set_symbols(&mut self, gl: &Context, symbols: &Symbols) -> Result<(), String> {
         let gl = &gl.raw;
-        let side = symbols.atlas_side() as i32;
-        let (rows, table) = symbol_table_texels(symbols);
-        // SAFETY: textures of their own, filled from the atlas of `side`
-        // squared RGBA8 pixels and a local of `2 * SYMBOL_ROW * rows` texels.
-        unsafe {
-            let atlas = texture(gl, glow::RGBA8, side, side, glow::RGBA, glow::UNSIGNED_BYTE, symbols.atlas(), true)?;
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, PADDING.ilog2() as i32);
-            gl.generate_mipmap(glow::TEXTURE_2D);
-            let table = match texture(gl, glow::RGBA32F, 2 * SYMBOL_ROW as i32, rows as i32, glow::RGBA, glow::FLOAT, &table, false) {
-                Ok(table) => table,
-                Err(e) => {
-                    gl.delete_texture(atlas);
-                    return Err(e);
-                }
-            };
-            // Level 0 and the two mipmaps below it, then the table.
-            let texels = (side * side) as usize;
-            let bytes = 4 * (texels + texels / 4 + texels / 16) + 2 * SYMBOL_ROW * rows * 16;
-            Ok(GpuSymbols { atlas, table, bytes })
-        }
+        let new = GpuSymbols::new(gl, symbols)?;
+        std::mem::replace(&mut self.symbols, new).free(gl);
+        Ok(())
     }
 
-    /// Uploads `symbols` again into `gpu`, after an add or a remove. The
-    /// atlas may have grown, so both textures are made anew. No palette or
-    /// tile is touched.
-    pub fn update_symbols(&self, gl: &Context, gpu: &mut GpuSymbols, symbols: &Symbols) -> Result<(), String> {
-        let new = self.symbols(gl, symbols)?;
-        std::mem::replace(gpu, new).free(gl);
-        Ok(())
+    /// The GPU memory the symbols last set hold.
+    pub fn symbols_bytes(&self) -> usize {
+        self.symbols.bytes
     }
 
     /// Uploads feature flags: `flags[i]` belongs to feature id `first + i`,
@@ -854,7 +1008,8 @@ impl Renderer {
     }
 
     /// Draws `mesh` where `camera` puts it, styled by `palette`: fills, then
-    /// lines, then points, all within the pixels the tile claims.
+    /// lines, then points as dots or markers, all within the pixels the tile
+    /// claims.
     pub fn draw(&self, gl: &Context, mesh: &GpuMesh, camera: &Camera, palette: &GpuPalette) {
         let gl = &gl.raw;
         self.draw_mesh(gl, mesh, camera, palette, Mode::Screen);
@@ -918,11 +1073,11 @@ impl Renderer {
             unsafe { gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4) }
         };
         let state = mode.state();
-        let (fill, line) = match mode {
-            Mode::Screen => (&self.fill, &self.line),
-            Mode::State(_) => (&self.fill_state, &self.line_state),
-            Mode::Pick { state: None, .. } => (&self.fill_pick, &self.line_pick),
-            Mode::Pick { state: Some(_), .. } => (&self.fill_pick_state, &self.line_pick_state),
+        let (fill, line, marker) = match mode {
+            Mode::Screen => (&self.fill, &self.line, &self.marker),
+            Mode::State(_) => (&self.fill_state, &self.line_state, &self.marker_state),
+            Mode::Pick { state: None, .. } => (&self.fill_pick, &self.line_pick, &self.marker_pick),
+            Mode::Pick { state: Some(_), .. } => (&self.fill_pick_state, &self.line_pick_state, &self.marker_pick_state),
         };
         let state_uniforms = |gl: &glow::Context, p: &Program| {
             if let Some(StateTest { first, count, mask, .. }) = state {
@@ -974,12 +1129,31 @@ impl Renderer {
                 }
             };
             gl.uniform_1_f32(line.u("u_min_half"), min_half);
-            for (vao, count, points) in [(mesh.line_vao, mesh.line_count, 0), (mesh.point_vao, mesh.point_count, 1)] {
-                if count > 0 {
-                    gl.uniform_1_i32(line.u("u_points"), points);
-                    gl.bind_vertex_array(Some(vao));
-                    gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, count);
+            if mesh.line_count > 0 {
+                gl.bind_vertex_array(Some(mesh.line_vao));
+                gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, mesh.line_count);
+            }
+
+            if mesh.point_count > 0 {
+                gl.active_texture(glow::TEXTURE2);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.symbols.table));
+                gl.active_texture(glow::TEXTURE3);
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.symbols.atlas));
+                gl.active_texture(glow::TEXTURE0);
+                gl.use_program(Some(marker.program));
+                gl.uniform_matrix_4_f32_slice(marker.u("u_matrix"), false, &matrix);
+                gl.uniform_matrix_4_f32_slice(marker.u("u_post"), false, &post);
+                gl.uniform_2_f32(marker.u("u_viewport"), camera.size_px[0] as f32, camera.size_px[1] as f32);
+                gl.uniform_1_i32(marker.u("u_palette"), 0);
+                gl.uniform_1_i32(marker.u("u_table"), 2);
+                gl.uniform_1_i32(marker.u("u_atlas"), 3);
+                gl.uniform_1_f32(marker.u("u_min_half"), min_half);
+                state_uniforms(gl, marker);
+                if let Mode::Pick { layer, .. } = mode {
+                    gl.uniform_1_u32(marker.u("u_layer"), layer);
                 }
+                gl.bind_vertex_array(Some(mesh.point_vao));
+                gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, mesh.point_count);
             }
 
             gl.bind_vertex_array(Some(self.square_vao));
@@ -1037,9 +1211,11 @@ impl Renderer {
         let gl = &gl.raw;
         // SAFETY: deletes objects this renderer created and alone refers to.
         unsafe {
-            for p in [self.fill, self.fill_pick, self.fill_state, self.fill_pick_state, self.line, self.line_pick, self.line_state, self.line_pick_state, self.raster, self.stencil] {
+            let markers = [self.marker, self.marker_pick, self.marker_state, self.marker_pick_state];
+            for p in [self.fill, self.fill_pick, self.fill_state, self.fill_pick_state, self.line, self.line_pick, self.line_state, self.line_pick_state, self.raster, self.stencil].into_iter().chain(markers) {
                 gl.delete_program(p.program);
             }
+            self.symbols.free(gl);
             gl.delete_vertex_array(self.square_vao);
             gl.delete_buffer(self.square_vbo);
         }

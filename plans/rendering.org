@@ -455,6 +455,9 @@ Not a backend but also feature-gated: =mvt= (decoder, no dependency;
   gives round caps and joins with no neighbour information. Points are the
   same quad around a zero-length segment: a dot of =point_size= in the fill
   colour.
+- *Points*, since 2026-11-21 (unreleased, for 0.3.0): a program of their
+  own draws the same dot, or the class's marker, a symbol from the
+  renderer's atlas (plans/custom-symbols.org § Markers).
 - *Each pixel belongs to one tile*, by stencil: a tile *claims* its square's
   unclaimed pixels (0 -> 2), draws only there (== 2), then *settles* them
   (-> 1). Tiles drawn finest first keep their area from coarser stand-ins;

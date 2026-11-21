@@ -59,7 +59,11 @@ pub enum Align {
 }
 
 /// A symbol drawn at a point, its longest side the class's `point_size`. A
-/// mask marker takes the class's `fill` colour.
+/// mask marker takes the class's `fill` colour; a colour marker's alpha is
+/// multiplied by the fill's, so a class needs an opaque fill, not
+/// [`Style::default`]'s transparent one, to draw it as it is. Check a
+/// palette's markers against the tiles' guard band with
+/// [`Palette::check_reach`].
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Marker {
@@ -165,6 +169,58 @@ impl Palette {
             .filter(|(_, s)| s.marker.is_some_and(|m| past(m.symbol, s.point_size)) || s.pattern.is_some_and(|p| past(p.symbol, p.repeat)))
             .map(|(class, _)| class as u8)
             .collect()
+    }
+
+    /// Whether every marker is whole across tile edges, for tiles prepared
+    /// with a guard band of `guard_px` ([`crate::Detail::guard_px`]). A
+    /// marker drawn by one tile is cut at its edge and the neighbour draws
+    /// the rest from its own copy of the point, so its reach from its point
+    /// must lie within the guard band. A level's tiles are shown down to
+    /// half their size before the next coarser level takes over, while a
+    /// marker keeps its size, so the reach is checked against half the guard
+    /// band.
+    ///
+    /// The reach is measured from the anchor. A marker against the map keeps
+    /// its rotation against the tile's edges, and is measured along them at
+    /// that rotation; one against the screen turns against them as the
+    /// camera turns, and is measured to its farthest corner. The error names
+    /// the first class that reaches too far, its size, and the `guard_px` it
+    /// needs. A symbol not in `symbols` draws nothing and is not checked.
+    pub fn check_reach(&self, symbols: &Symbols, guard_px: f64) -> Result<(), String> {
+        for (class, s) in self.styles.iter().enumerate() {
+            let Some(m) = s.marker else { continue };
+            let Some(symbol) = symbols.get(m.symbol) else { continue };
+            let reach = marker_reach(symbol, m, s.point_size);
+            if reach > guard_px / 2.0 {
+                let need = (2.0 * reach).ceil();
+                return Err(format!(
+                    "class {class} draws a {}-pixel marker reaching {reach:.1} pixels from its point, past half the guard band of {guard_px} pixels: it needs a guard_px of {need}",
+                    s.point_size
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// How far a marker of `size` reaches from its point, in pixels (see
+/// [`Palette::check_reach`]).
+fn marker_reach(symbol: &crate::Symbol, m: Marker, size: f32) -> f64 {
+    if size <= 0.0 {
+        return 0.0;
+    }
+    let (w, h) = (symbol.width() as f64, symbol.height() as f64);
+    let scale = size as f64 / w.max(h);
+    let [ax, ay] = symbol.anchor.map(|a| a as f64);
+    let xs = [-ax * w * scale, (1.0 - ax) * w * scale];
+    let ys = [-ay * h * scale, (1.0 - ay) * h * scale];
+    let corners = xs.iter().flat_map(|&x| ys.iter().map(move |&y| (x, y)));
+    match m.align {
+        Align::Screen => corners.map(|(x, y)| x.hypot(y)).fold(0.0, f64::max),
+        Align::Map => {
+            let (sin, cos) = (m.rotation as f64).to_radians().sin_cos();
+            corners.map(|(x, y)| (x * cos - y * sin).abs().max((x * sin + y * cos).abs())).fold(0.0, f64::max)
+        }
     }
 }
 
@@ -290,6 +346,50 @@ mod tests {
         assert_eq!(p.blurred(&symbols), vec![2, 3]);
         symbols.remove(pin);
         assert_eq!(p.blurred(&symbols), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn markers_reach_from_their_anchor_at_their_worst_rotation() {
+        let mut symbols = Symbols::new();
+        let square = symbols.add(crate::Symbol::new(10, 10, vec![0; 400]).unwrap()).unwrap();
+        let mut pin = crate::Symbol::new(10, 20, vec![0; 800]).unwrap();
+        pin.anchor = [0.5, 1.0];
+        let pin = symbols.add(pin).unwrap();
+        let reach = |id, align, rotation, size| {
+            let marker = Marker { align, rotation, ..Marker::new(id) };
+            marker_reach(symbols.get(id).unwrap(), marker, size)
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // A centred square: half its side against the map, half its
+        // diagonal against the screen, as the map turns under it.
+        assert!(close(reach(square, Align::Map, 0.0, 20.0), 10.0));
+        assert!(close(reach(square, Align::Map, 45.0, 20.0), 200f64.sqrt()));
+        assert!(close(reach(square, Align::Screen, 0.0, 20.0), 200f64.sqrt()));
+        // A pin anchored at its tip, 20 tall: its whole height above the
+        // point, and its top corners farther still once it can turn.
+        assert!(close(reach(pin, Align::Map, 0.0, 20.0), 20.0));
+        assert!(close(reach(pin, Align::Screen, 0.0, 20.0), 425f64.sqrt()));
+        assert_eq!(reach(pin, Align::Map, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn a_palette_is_checked_against_half_the_guard_band() {
+        let mut symbols = Symbols::new();
+        let mut pin = crate::Symbol::new(10, 20, vec![0; 800]).unwrap();
+        pin.anchor = [0.5, 1.0];
+        let pin = symbols.add(pin).unwrap();
+        let mut p = Palette::new();
+        let marker = Marker { align: Align::Map, ..Marker::new(pin) };
+        p.set(4, Style { marker: Some(marker), point_size: 16.0, ..Style::default() });
+        assert_eq!(p.check_reach(&symbols, 32.0), Ok(()));
+        p.set(5, Style { marker: Some(marker), point_size: 17.0, ..Style::default() });
+        let err = p.check_reach(&symbols, 32.0).unwrap_err();
+        assert!(err.starts_with("class 5 draws a 17-pixel marker"), "{err}");
+        assert!(err.ends_with("guard_px of 34"), "{err}");
+        assert_eq!(p.check_reach(&symbols, 34.0), Ok(()));
+        // A dot is no marker, and a missing symbol draws nothing.
+        symbols.remove(pin);
+        assert_eq!(p.check_reach(&symbols, 0.0), Ok(()));
     }
 
     #[test]

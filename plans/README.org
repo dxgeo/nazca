@@ -16,4 +16,4 @@ Design notes, one self-contained plan per file, ordered by dependency.
 - [[file:custom-symbols.org][custom-symbols.org]] -- markers, dashed lines
   and pattern fills from embedder-supplied symbols, on screen, in picks and
   in SVG (2026-11-19; steps 0 to 6 decided for 0.3.0, steps 0 and 1
-  built).
+  built, step 2 but for SVG markup).

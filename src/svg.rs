@@ -11,7 +11,17 @@
 //!   These are exactly the segments the GPU draws, so edges that clipping
 //!   made are not stroked here either, and lines draw over every fill of
 //!   their layer, as on screen.
-//! - *Points* are `<circle>`s of the class's point size, in its fill colour.
+//! - *Points* are `<circle>`s of the class's point size, in its fill colour,
+//!   or, where the class has a [`crate::Marker`], its symbol: a `<use>` of
+//!   it placed, sized and turned as on screen, or for a mask a `<rect>` of
+//!   the class's fill through a `<mask>` of it. Each symbol a marker uses is
+//!   written once, in `<defs>`, from the [`Symbols`] given to
+//!   [`SvgWriter::symbols`]: as a PNG of its pixels, stored uncompressed by
+//!   a small encoder here. A mask's PNG is white where it is opaque, so a
+//!   viewer reading the mask by luminance, without `mask-type: alpha`, sees
+//!   the same mask. A point is written by the tile whose own area holds it,
+//!   so a point in a neighbour's guard band too is written once, not once
+//!   from each.
 //!
 //! *A layer is one `<path>` per class for its fills and one for its lines*,
 //! gathered over every [`SvgWriter::draw`] of the layer and written when it
@@ -45,8 +55,9 @@
 
 use crate::camera::Camera;
 use crate::prepare::Mesh;
-use crate::style::Palette;
-use std::collections::BTreeMap;
+use crate::style::{Align, Palette};
+use crate::symbol::{Kind, Symbol, Symbols};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 /// Builds one SVG document. See the module docs.
@@ -62,6 +73,9 @@ pub struct SvgWriter {
     fills: BTreeMap<u8, String>,
     lines: BTreeMap<u8, String>,
     points: String,
+    /// The symbols markers draw, by id, and the ids a marker has used.
+    symbols: BTreeMap<u16, Symbol>,
+    used: BTreeSet<u16>,
 }
 
 impl SvgWriter {
@@ -77,7 +91,17 @@ impl SvgWriter {
             fills: BTreeMap::new(),
             lines: BTreeMap::new(),
             points: String::new(),
+            symbols: BTreeMap::new(),
+            used: BTreeSet::new(),
         }
+    }
+
+    /// The symbols markers draw from, in place of any given before. Each one
+    /// a marker uses is written once, in `<defs>`. Give them before drawing
+    /// the layers that use them; a marker whose symbol isn't here draws
+    /// nothing, as on screen.
+    pub fn symbols(&mut self, symbols: &Symbols) {
+        self.symbols = symbols.iter().map(|(id, s, _)| (id.0, s.clone())).collect();
     }
 
     /// Starts a layer: what follows draws over what came before, and may use
@@ -201,13 +225,45 @@ impl SvgWriter {
         for &i in &mesh.points {
             let class = class_of(i);
             let style = palette.get(class);
-            if style.point_size <= 0.0 || style.fill[3] <= 0.0 || !shown(i) {
+            // A point in the tile's own area, half open so a point on an
+            // edge belongs to one tile.
+            let local = &mesh.vertices[i as usize * 3..i as usize * 3 + 2];
+            let own = local.iter().all(|&v| (-1.0..1.0).contains(&v));
+            if style.point_size <= 0.0 || style.fill[3] <= 0.0 || !own || !shown(i) {
                 continue;
             }
             let [x, y] = screen(i);
-            let name = format!("p{layer}-{class}");
-            self.styles.entry(name.clone()).or_insert_with(|| format!("fill:{};stroke:none", paint(style.fill)));
-            let _ = writeln!(self.points, r#"<circle class="{name}" cx="{}" cy="{}" r="{}"/>"#, num(x), num(y), num(style.point_size as f64 / 2.0));
+            let Some(marker) = style.marker else {
+                let name = format!("p{layer}-{class}");
+                self.styles.entry(name.clone()).or_insert_with(|| format!("fill:{};stroke:none", paint(style.fill)));
+                let _ = writeln!(self.points, r#"<circle class="{name}" cx="{}" cy="{}" r="{}"/>"#, num(x), num(y), num(style.point_size as f64 / 2.0));
+                continue;
+            };
+            let Some(symbol) = self.symbols.get(&marker.symbol.0) else { continue };
+            let id = marker.symbol.0;
+            self.used.insert(id);
+            let (w, h) = (symbol.width(), symbol.height());
+            let mut turn = marker.rotation as f64;
+            if marker.align == Align::Map {
+                turn -= camera.bearing.to_degrees();
+            }
+            let mut transform = format!("translate({},{})", num(x), num(y));
+            if turn.rem_euclid(360.0) != 0.0 {
+                let _ = write!(transform, " rotate({})", num(turn));
+            }
+            let scale = style.point_size as f64 / w.max(h) as f64;
+            let [ax, ay] = symbol.anchor.map(|a| a as f64);
+            let _ = write!(transform, " scale({}) translate({},{})", fine(scale), num(-ax * w as f64), num(-ay * h as f64));
+            let name = format!("m{layer}-{class}");
+            if symbol.kind == Kind::Mask {
+                self.styles.entry(name.clone()).or_insert_with(|| format!("fill:{};stroke:none", paint(style.fill)));
+                let _ = writeln!(self.points, r#"<rect class="{name}" width="{w}" height="{h}" mask="url(#mask{id})" transform="{transform}"/>"#);
+            } else if style.fill[3] < 1.0 {
+                self.styles.entry(name.clone()).or_insert_with(|| format!("opacity:{}", num(style.fill[3] as f64)));
+                let _ = writeln!(self.points, r##"<use class="{name}" href="#sym{id}" transform="{transform}"/>"##);
+            } else {
+                let _ = writeln!(self.points, r##"<use href="#sym{id}" transform="{transform}"/>"##);
+            }
         }
     }
 
@@ -224,6 +280,20 @@ impl SvgWriter {
             }
             out.push_str("</style>\n");
         }
+        if !self.used.is_empty() {
+            out.push_str("<defs>\n");
+            for id in &self.used {
+                let symbol = &self.symbols[id];
+                let mask = symbol.kind == Kind::Mask;
+                let (w, h) = (symbol.width(), symbol.height());
+                let png = png(w, h, symbol.pixels(), mask);
+                let _ = writeln!(out, r#"<image id="sym{id}" width="{w}" height="{h}" href="data:image/png;base64,{}"/>"#, base64(&png));
+                if mask {
+                    let _ = writeln!(out, r##"<mask id="mask{id}" style="mask-type:alpha"><use href="#sym{id}"/></mask>"##);
+                }
+            }
+            out.push_str("</defs>\n");
+        }
         if let Some(bg) = self.background {
             let _ = writeln!(out, r#"<rect width="{w}" height="{h}" style="fill:{}"/>"#, paint(bg));
         }
@@ -231,6 +301,79 @@ impl SvgWriter {
         out.push_str("</svg>\n");
         out
     }
+}
+
+/// An RGBA8 PNG of `pixels`, its deflate blocks stored uncompressed, so it
+/// needs no compressor. White where `white`, keeping only the alpha.
+fn png(w: u32, h: u32, pixels: &[u8], white: bool) -> Vec<u8> {
+    let mut raw = Vec::with_capacity(pixels.len() + h as usize);
+    for row in pixels.chunks_exact(w as usize * 4) {
+        raw.push(0); // no filter
+        if white {
+            raw.extend(row.chunks_exact(4).flat_map(|p| [255, 255, 255, p[3]]));
+        } else {
+            raw.extend_from_slice(row);
+        }
+    }
+    // zlib: a header, stored blocks of at most 65,535 bytes, the Adler-32.
+    let mut z = vec![0x78, 0x01];
+    let blocks = raw.chunks(65535);
+    let last = blocks.len().max(1) - 1;
+    for (k, block) in raw.chunks(65535).enumerate() {
+        let n = block.len() as u16;
+        z.push((k == last) as u8);
+        z.extend_from_slice(&n.to_le_bytes());
+        z.extend_from_slice(&(!n).to_le_bytes());
+        z.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &raw {
+        a = (a + byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    z.extend_from_slice(&(b << 16 | a).to_be_bytes());
+
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let start = out.len();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let crc = crc32(&out[start..]);
+        out.extend_from_slice(&crc.to_be_bytes());
+    };
+    let mut header = Vec::with_capacity(13);
+    header.extend_from_slice(&w.to_be_bytes());
+    header.extend_from_slice(&h.to_be_bytes());
+    header.extend_from_slice(&[8, 6, 0, 0, 0]); // 8 bits, RGBA, deflate, no filter, no interlace
+    chunk(b"IHDR", &header);
+    chunk(b"IDAT", &z);
+    chunk(b"IEND", &[]);
+    out
+}
+
+/// The CRC-32 PNG chunks end with.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { 0xedb8_8320 ^ (crc >> 1) } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for group in bytes.chunks(3) {
+        let n = group.iter().enumerate().fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= group.len() { ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
 }
 
 /// Twice a ring's signed area by the shoelace formula: positive when it
@@ -255,6 +398,14 @@ fn num(v: f64) -> String {
         s.pop();
     }
     s
+}
+
+/// A scale to a millionth, without trailing zeros: a hundredth of a 48-pixel
+/// image's scale would move its far edge by half a pixel.
+fn fine(v: f64) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".into() } else { s.into() }
 }
 
 /// A straight-alpha RGBA colour as CSS: `#rrggbb`, with an opacity when it
@@ -440,6 +591,110 @@ mod tests {
         svg.begin_layer();
         svg.draw(&mesh, &cam, &palette());
         assert_eq!(write_state(&mesh, &cam, 10, &[1, 1, 1], 1), svg.finish());
+    }
+
+    /// Symbols for markers: a 4 x 2 colour image, and a 2 x 4 mask anchored
+    /// at its bottom middle.
+    fn symbols() -> (Symbols, crate::SymbolId, crate::SymbolId) {
+        let mut symbols = Symbols::new();
+        let colour = symbols.add(Symbol::new(4, 2, [10, 20, 30, 255].repeat(8)).unwrap()).unwrap();
+        let mut pin = Symbol::new(2, 4, [10, 20, 30, 128].repeat(8)).unwrap();
+        pin.kind = Kind::Mask;
+        pin.anchor = [0.5, 1.0];
+        let pin = symbols.add(pin).unwrap();
+        (symbols, colour, pin)
+    }
+
+    fn marker_palette(colour: crate::SymbolId, pin: crate::SymbolId) -> Palette {
+        use crate::style::Marker;
+        let mut p = Palette::new();
+        let fill = [0.0, 0.0, 1.0, 1.0];
+        p.set(1, Style { fill, point_size: 8.0, marker: Some(Marker { rotation: 30.0, ..Marker::new(colour) }), ..Style::default() });
+        p.set(2, Style { fill, point_size: 8.0, marker: Some(Marker { rotation: 30.0, align: Align::Map, ..Marker::new(colour) }), ..Style::default() });
+        p.set(3, Style { fill: [1.0, 0.0, 0.0, 0.5], point_size: 8.0, marker: Some(Marker::new(pin)), ..Style::default() });
+        p
+    }
+
+    #[test]
+    fn markers_are_uses_of_one_definition_each() {
+        let (symbols, colour, pin) = symbols();
+        let mut cam = camera();
+        cam.bearing = std::f64::consts::FRAC_PI_2;
+        let mut b = MeshBuilder::for_view(&cam);
+        for class in 1..=3 {
+            b.set_class(class);
+            b.point([100.0, 50.0]);
+            b.point([110.0, 50.0]);
+        }
+        let mesh = b.finish();
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.symbols(&symbols);
+        svg.begin_layer();
+        svg.draw(&mesh, &cam, &marker_palette(colour, pin));
+        let out = svg.finish();
+        // Each symbol once, the mask's with its mask.
+        assert_eq!(out.matches("<image id=\"sym0\"").count(), 1, "{out}");
+        assert_eq!(out.matches("<image id=\"sym1\"").count(), 1, "{out}");
+        assert!(out.contains(r##"<mask id="mask1" style="mask-type:alpha"><use href="#sym1"/></mask>"##), "{out}");
+        // Longest side 8 for an image of 4: scale 2, about the centre. On
+        // the screen its rotation holds; on the map it turns back by the
+        // bearing.
+        assert!(out.contains(r##"<use href="#sym0" transform="translate(100,50) rotate(30) scale(2) translate(-2,-1)"/>"##), "{out}");
+        assert!(out.contains(r##"<use href="#sym0" transform="translate(100,50) rotate(-60) scale(2) translate(-2,-1)"/>"##), "{out}");
+        // The mask: the class's fill through it, anchored at its foot.
+        assert!(out.contains(r#"<rect class="m1-3" width="2" height="4" mask="url(#mask1)" transform="translate(100,50) scale(2) translate(-1,-4)"/>"#), "{out}");
+        assert!(out.contains(".m1-3{fill:#ff0000;opacity:0.5;stroke:none}"), "{out}");
+        assert_eq!(out.matches("<use href=\"#sym0\"").count(), 4, "{out}");
+        // A symbol not given draws nothing.
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.begin_layer();
+        svg.draw(&mesh, &cam, &marker_palette(colour, pin));
+        assert!(!svg.finish().contains("<use"));
+    }
+
+    #[test]
+    fn a_point_in_two_guard_bands_is_written_once() {
+        use crate::grid::TileFrame;
+        use crate::prepare::Detail;
+        let cam = camera();
+        let tile = |cx: f64| {
+            let frame = TileFrame { center: [cx, 50.0], half_span: 50.0 };
+            let mut b = MeshBuilder::new(frame, Detail { tile_px: 100.0, grid_px: 0.25, guard_px: 10.0 });
+            b.set_class(1);
+            b.point([103.0, 50.0]);
+            b.finish()
+        };
+        let tiles = [tile(50.0), tile(150.0)];
+        assert!(tiles.iter().all(|t| t.points.len() == 1));
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.begin_layer();
+        for t in &tiles {
+            svg.draw(t, &cam, &palette());
+        }
+        assert_eq!(svg.finish().matches("<circle").count(), 1);
+    }
+
+    #[test]
+    fn a_png_is_whole() {
+        let pixels = [1, 2, 3, 4, 5, 6, 7, 8];
+        let out = png(2, 1, &pixels, false);
+        assert_eq!(&out[..8], b"\x89PNG\r\n\x1a\n");
+        // IHDR: 2 x 1, 8-bit RGBA, and its CRC over type and data.
+        assert_eq!(&out[8..29], &[0, 0, 0, 13, b'I', b'H', b'D', b'R', 0, 0, 0, 2, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+        assert_eq!(&out[29..33], &crc32(&out[12..29]).to_be_bytes());
+        // IDAT: one stored block of the filter byte and the row, then the
+        // Adler-32 of the same nine bytes.
+        let idat = &out[33..];
+        assert_eq!(&idat[4..8], b"IDAT");
+        assert_eq!(&idat[8..10], &[0x78, 0x01]);
+        assert_eq!(&idat[10..15], &[1, 9, 0, 0xf6, 0xff]);
+        assert_eq!(&idat[15..24], &[0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(&idat[24..28], &[0x00, 0x81, 0x00, 0x25]);
+        assert!(out.ends_with(&[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82]));
+        // A mask is white, its alpha kept.
+        assert_eq!(&png(2, 1, &pixels, true)[48..57], &[0, 255, 255, 255, 4, 255, 255, 255, 8]);
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+        assert_eq!([base64(b"M"), base64(b"Ma"), base64(b"Man")], ["TQ==", "TWE=", "TWFu"]);
     }
 
     #[test]

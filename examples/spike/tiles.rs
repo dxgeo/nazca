@@ -1,7 +1,8 @@
 //! The frame loop both spikes share: select the tiles the camera needs, plan
 //! them against the cache, prepare and upload what is missing, and draw --
-//! the counties as one layer, the chosen ones over them, an optional raster
-//! overlay as the next -- and pick the county under a pixel. A filter shows
+//! the counties and their markers as one layer, the chosen ones over them,
+//! an optional raster overlay as the next -- and pick the county or marker
+//! under a pixel. A filter shows
 //! every other county, by drawing and picking the layer only through a
 //! state; [`TiledMap::svg`] writes the same view through the same states.
 //!
@@ -9,11 +10,11 @@
 //! cache before the frame draws and no stand-in is ever shown. A real
 //! embedder fetches asynchronously and draws whatever the plan says now.
 
-use crate::data::{self, Counties, Overlay};
+use crate::data::{self, Counties, Icons, MARKER_BASE, Markers, Overlay};
 use nazca::gl::{Context, GpuColormap, GpuMesh, GpuPalette, GpuRaster, GpuState, Pick, Picker, Renderer};
 use nazca::grid::TileFrame;
 use nazca::svg::SvgWriter;
-use nazca::{Camera, Mesh, MeshBuilder, Palette, Plan, Style, TileCache, TileGrid, TileId, TileKey, TileSelector};
+use nazca::{Camera, Detail, Mesh, MeshBuilder, Palette, Plan, Style, TileCache, TileGrid, TileId, TileKey, TileSelector};
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -58,6 +59,8 @@ pub struct TiledMap {
     picker: Picker,
     overlay: Overlay,
     raster: Option<(GpuRaster, GpuColormap)>,
+    icons: Icons,
+    markers: Markers,
 }
 
 /// What the last frame did.
@@ -71,9 +74,12 @@ pub struct Stats {
 
 impl TiledMap {
     /// The counties on 512-pixel Web Mercator tiles, cached up to `budget`
-    /// bytes, with `overlay` over them.
-    pub fn new(gl: &Context, renderer: &Renderer, budget: usize, overlay: Overlay) -> TiledMap {
+    /// bytes, with `overlay` over them. Sets `renderer`'s symbols to the
+    /// markers'.
+    pub fn new(gl: &Context, renderer: &mut Renderer, budget: usize, overlay: Overlay) -> TiledMap {
         let counties = Counties::load();
+        let icons = data::icons();
+        renderer.set_symbols(gl, &icons.symbols).unwrap();
         let mut map = TiledMap {
             flags: vec![0; counties.len()],
             counties,
@@ -86,10 +92,12 @@ impl TiledMap {
             filtered: false,
             needed: Vec::new(),
             plan: Plan::default(),
-            palette: renderer.palette(gl, &data::palette()).unwrap(),
+            palette: renderer.palette(gl, &data::palette(Markers::None, &icons)).unwrap(),
             picker: Picker::new(gl).unwrap(),
             overlay: Overlay::None,
             raster: None,
+            icons,
+            markers: Markers::None,
         };
         map.set_overlay(gl, renderer, overlay);
         map
@@ -115,6 +123,25 @@ impl TiledMap {
         }
     }
 
+    /// Where the marker of the county called `name` stands.
+    pub fn marker(&self, name: &str) -> Option<[f64; 2]> {
+        self.counties.find(name).map(|i| self.counties.centre(i as usize))
+    }
+
+    pub fn markers(&self) -> Markers {
+        self.markers
+    }
+
+    /// Restyles the markers: one palette upload, no tile touched. The
+    /// palette is checked against the guard band the tiles are prepared
+    /// with.
+    pub fn set_markers(&mut self, gl: &Context, renderer: &Renderer, markers: Markers) {
+        let palette = data::palette(markers, &self.icons);
+        palette.check_reach(&self.icons.symbols, Detail::default().guard_px).unwrap();
+        renderer.update_palette(gl, &self.palette, &palette);
+        self.markers = markers;
+    }
+
     /// Draws one frame of `camera`'s view, preparing and uploading the tiles
     /// it needs that the cache lacks.
     pub fn draw(&mut self, gl: &Context, renderer: &Renderer, camera: &Camera) -> Stats {
@@ -133,7 +160,9 @@ impl TiledMap {
         let prepared = self.plan.fetch.len();
         for &id in &self.plan.fetch {
             let mesh = self.counties.prepare(&self.grid, id);
-            let span = match (mesh.ids.iter().min(), mesh.ids.iter().max()) {
+            // The counties' ids; their markers' hold no state.
+            let counties = mesh.ids.iter().filter(|&&f| f < MARKER_BASE);
+            let span = match (counties.clone().min(), counties.max()) {
                 (Some(&lo), Some(&hi)) => lo as usize..hi as usize + 1,
                 _ => 0..0,
             };
@@ -186,9 +215,9 @@ impl TiledMap {
         }
     }
 
-    /// The county under screen position `px`, over the tiles the last frame
-    /// drew, and its feature id.
-    pub fn pick(&mut self, gl: &Context, renderer: &Renderer, camera: &Camera, px: [f64; 2]) -> Option<(&'static str, u32)> {
+    /// What lies under screen position `px`, over the tiles the last frame
+    /// drew, a county or its marker, named, and the county's feature id.
+    pub fn pick(&mut self, gl: &Context, renderer: &Renderer, camera: &Camera, px: [f64; 2]) -> Option<(String, u32)> {
         self.picker.begin(gl, camera, px, 6.0);
         self.picker.begin_layer(gl);
         for &id in &self.plan.draw {
@@ -200,8 +229,11 @@ impl TiledMap {
             }
         }
         let pick = self.picker.finish(gl)?;
-        self.last_pick = Some(pick.feature);
-        Some((self.counties.name(pick.feature)?, pick.feature))
+        let county = pick.feature % MARKER_BASE;
+        self.last_pick = Some(county);
+        let name = self.counties.name(county)?;
+        let what = if pick.feature >= MARKER_BASE { format!("the marker of {name} County") } else { format!("{name} County") };
+        Some((what, county))
     }
 
     /// Flips state `bit` of `feature`, rewriting the flags of the tiles that
@@ -241,11 +273,13 @@ impl TiledMap {
         self.counties.prepare_into(&mut builder, camera.visible_bounds());
         let mesh = builder.finish();
         let mut svg = SvgWriter::new(camera.size_px, Some(data::BACKGROUND));
+        svg.symbols(&self.icons.symbols);
         svg.begin_layer();
+        let palette = data::palette(self.markers, &self.icons);
         if self.filtered {
-            svg.draw_state(&mesh, camera, &data::palette(), 0, &self.flags, SHOWN);
+            svg.draw_state(&mesh, camera, &palette, 0, &self.flags, SHOWN);
         } else {
-            svg.draw(&mesh, camera, &data::palette());
+            svg.draw(&mesh, camera, &palette);
         }
         for (bit, palette) in [(SELECTED, selected_style()), (HOVERED, hovered_style())] {
             svg.begin_layer();
@@ -260,6 +294,34 @@ impl TiledMap {
             self.toggle(gl, renderer, feature, bit);
         }
     }
+}
+
+/// Checks the markers: a pin that reaches past half the guard band only
+/// when it turns is refused, and with the colour markers drawn, a click on
+/// a badge picks it, and a click on its transparent corner picks the county
+/// under it. Leaves the markers as they were.
+pub fn check_markers(map: &mut TiledMap, gl: &Context, renderer: &Renderer, camera: &Camera) -> Result<String, String> {
+    let guard = Detail::default().guard_px;
+    let refused = data::too_far(&map.icons).check_reach(&map.icons.symbols, guard).err().ok_or("a turning 16-pixel pin was not refused")?;
+    let was = map.markers;
+    map.set_markers(gl, renderer, Markers::Colour);
+    map.draw(gl, renderer, camera);
+    // Hampden's marker is a badge 22 pixels across, over land: a disc of
+    // radius 10.3 in a square of 11 a side, so (8.8, 8.8) off its centre is
+    // transparent. (Barnstable's, the first badge, stands in the bay.)
+    let name = "Hampden";
+    let [x, y] = camera.map_to_screen(map.marker(name).ok_or("no Hampden County")?);
+    let centre = map.pick(gl, renderer, camera, [x, y]).map(|p| p.0);
+    let corner = map.pick(gl, renderer, camera, [x + 8.8, y + 8.8]).map(|p| p.0);
+    map.set_markers(gl, renderer, was);
+    let badge = format!("the marker of {name} County");
+    if centre.as_deref() != Some(badge.as_str()) {
+        return Err(format!("the badge's centre picked {centre:?}"));
+    }
+    if corner.as_deref().is_none_or(|c| c.starts_with("the marker")) {
+        return Err(format!("the badge's transparent corner picked {corner:?}"));
+    }
+    Ok(format!("marker check passed: refused \"{refused}\"; the badge's centre picked {badge}, its corner {}", corner.unwrap()))
 }
 
 /// Which primitive a feature of [`check_state`]'s grid is.

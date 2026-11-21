@@ -3,9 +3,10 @@
 //! in a WebGL2 canvas. Drag to pan, scroll to zoom about the cursor,
 //! right-drag to rotate about the canvas's centre, click to pick a county
 //! and toggle its selection, press H to toggle a hover state on the county
-//! picked last, press F to show every other county, press S to log the view
-//! as an SVG to the console, press C to run the state check, and press R to
-//! cycle the raster overlay.
+//! picked last, press F to show every other county, press M to cycle the
+//! counties' markers, press S to log the view as an SVG to the console,
+//! press C to run the state check, press K to run the marker check, and
+//! press R to cycle the raster overlay.
 //!
 //!   wasm-pack build --target web --release
 //!   python3 -m http.server   # then open http://localhost:8000/
@@ -51,7 +52,7 @@ impl State {
         let s = self.map.draw(&self.gl, &self.renderer, &self.camera);
         if let Some(stats) = &self.stats {
             stats.set_text_content(Some(&format!(
-                "{} · level {} · {} tiles drawn, {} just prepared · {} cached, {} KB · {w}x{h} px · overlay {:?}{}",
+                "{} · level {} · {} tiles drawn, {} just prepared · {} cached, {} KB · {w}x{h} px · overlay {:?} · markers {:?}{}",
                 self.version,
                 s.level,
                 s.drawn,
@@ -59,6 +60,7 @@ impl State {
                 s.cached,
                 s.cached_bytes / 1024,
                 self.map.overlay(),
+                self.map.markers(),
                 self.picked
             )));
         }
@@ -84,10 +86,10 @@ pub fn start() -> Result<(), JsValue> {
     let context: WebGl2RenderingContext =
         canvas.get_context_with_context_options("webgl2", &attributes)?.ok_or("WebGL2 unavailable")?.dyn_into()?;
     let gl = Context::from_webgl2(context);
-    let renderer = Renderer::new(&gl).map_err(|e| JsValue::from_str(&e))?;
+    let mut renderer = Renderer::new(&gl).map_err(|e| JsValue::from_str(&e))?;
     let version = gl.version();
 
-    let map = TiledMap::new(&gl, &renderer, 16 << 20, Overlay::None);
+    let map = TiledMap::new(&gl, &mut renderer, 16 << 20, Overlay::None);
     let mut camera = Camera::new([0.0, 0.0], 1.0, [w, h]);
     camera.fit_bounds(map.bounds(), 0.04 * w.min(h) as f64);
     let stats = document.get_element_by_id("stats");
@@ -127,7 +129,7 @@ pub fn start() -> Result<(), JsValue> {
         st.picked = match st.map.pick(&st.gl, &st.renderer, &st.camera, px) {
             Some((name, id)) => {
                 st.map.toggle(&st.gl, &st.renderer, id, SELECTED);
-                format!(" · picked {name} County (feature {id})")
+                format!(" · picked {name} (feature {id})")
             }
             None => " · picked nothing".to_string(),
         };
@@ -180,7 +182,17 @@ pub fn start() -> Result<(), JsValue> {
                 let on = !st.map.filtered();
                 st.map.set_filter(&st.gl, &st.renderer, on);
             }
+            "m" => {
+                let next = st.map.markers().next();
+                st.map.set_markers(&st.gl, &st.renderer, next);
+            }
             "s" => web_sys::console::log_1(&st.map.svg(&st.camera).into()),
+            "k" => {
+                st.picked = match tiles::check_markers(&mut st.map, &st.gl, &st.renderer, &st.camera) {
+                    Ok(report) => format!(" · {report}"),
+                    Err(e) => format!(" · marker check failed: {e}"),
+                };
+            }
             "c" => {
                 st.picked = match tiles::check_state(&st.gl, &st.renderer, st.camera.size_px) {
                     Ok(report) => format!(" · {report}"),

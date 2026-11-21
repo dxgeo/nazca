@@ -63,7 +63,7 @@ fn main() {
     // The counties, prepared for this page.
     let mut mesh = MeshBuilder::for_view(&camera);
     counties.prepare_into(&mut mesh, camera.visible_bounds());
-    let mut palette = data::palette();
+    let mut palette = data::palette(data::Markers::None, &data::icons());
     for class in 1..=6 {
         let mut s = *palette.get(class);
         s.fill[3] = 0.85;

@@ -9,9 +9,10 @@ Written 2026-11-19 as a proposal. § OPEN QUESTIONS 1 to 6 are decided, and
 steps 0 to 6 are being built for 0.3.0, on the =custom-symbols= branch. Step
 0 is built (2026-11-20). Step 1 is built (2026-11-21), with the atlas's
 padding and mipmaps, its premultiplied pixels and its limits decided for
-it; nothing draws a symbol yet, and the spike's screenshots, SVG and state
-check are byte-identical to step 0's. Step 2 is next. Step 7, vector
-symbols, waits on
+it. Step 2 is built (2026-11-21) but for SVG markup, which waits on a
+question (§ SVG output): markers draw, pick and write SVG from pixels,
+natively and in Chrome's WebGL2, and the spike's views without markers are
+byte-identical to step 1's. Step 7, vector symbols, waits on
 § OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
 symbol at a time. Markers, dashes and pattern fills are three parts that
 share an atlas and a palette layout, so each can be built once the shared
@@ -222,8 +223,8 @@ Ruled out:
   by the class's marker row: a class with no marker keeps today's dot
   path, so a layer mixing dots and markers is still one draw.
 - *Picking follows the image*: a pick fragment is kept where the sampled
-  alpha passes a threshold, so a click on the transparent corner of a pin
-  picks what lies under it. Through a state, as =Picker::draw_state= does
+  alpha is at least 0.5, the middle of an antialiased edge, so a click on
+  the transparent corner of a pin picks what lies under it. Through a state, as =Picker::draw_state= does
   now.
 - *Tile edges*: a marker drawn by one tile is cut at that tile's edge, and
   the neighbour draws the rest from its own copy of the point. So a marker
@@ -232,11 +233,13 @@ Ruled out:
   palette whose markers reach past the guard band is an error naming the
   class and the size, from a check the embedder calls (below). The reach is measured from the anchor, not the
   centre, and at the marker's worst rotation: a pin anchored at its tip
-  reaches its whole height above the point, and a marker that turns with
-  the map reaches as far as its anchor's farthest corner in every
-  direction (half the diagonal, about 0.71 of the size, for a square
-  anchored at its centre). A marker rotated against the screen has one
-  rotation, and is checked at it. The second is the embedder's, as it is
+  reaches its whole height above the point. Tile edges are the map's, so a
+  marker rotated against the map keeps one rotation against them, and is
+  checked along them at it; a marker upright on the screen turns against
+  them as the camera turns, and reaches as far as its anchor's farthest
+  corner in every direction (half the diagonal, about 0.71 of the size, for
+  a square anchored at its centre). (The proposal had the two the other way
+  round; corrected when built.) The second is the embedder's, as it is
   for lines now, and the README says so.
 - *The check is against half the guard band.* Decided 2026-11-21 (user
   decision). The guard band is in the tile's own pixels, and the flat
@@ -411,7 +414,9 @@ size it was drawn at, or is built from data.
   compressed, so it needs no dependency).
 - *Markers* are =<use>= elements with the symbol's position, size and
   rotation. A mask marker is the class's colour through a =<mask>= of the
-  symbol (=mask-type: alpha=).
+  symbol (=mask-type: alpha=). Built: a mask's PNG is written white with
+  its alpha, so a viewer that reads masks by luminance, without
+  =mask-type=, sees the same mask.
 - *Patterns* are a =<pattern>= per class, in user space, with the same
   anchor and repeat as on screen, holding a =<use>= of the symbol, tinted
   the same way. The class's CSS fill names it.
@@ -511,7 +516,9 @@ Ruled out:
    =symbol.rs= module docs, plans/rendering.org § STYLING.
 2. *Markers*: the marker program and its four forms, picking by alpha, the
    guard band check, =<use>= and =<mask>= in SVG. Docs: =gl.rs= and
-   =svg.rs= module docs.
+   =svg.rs= module docs. Built 2026-11-21 but for SVG markup, with the
+   renderer holding the atlas (=Renderer::set_symbols=),
+   =Palette::check_reach=, and points written once in SVG.
 3. *Dashes*: =Mesh::distances= and =set_line_start=, the segment instance,
    =LINE_FS='s dash test, =stroke-dasharray= in SVG.
 4. *Pattern fills*: the anchor uniform, =FILL_FS='s pattern sample,
@@ -535,7 +542,9 @@ Ruled out:
   an add past the last id is an error too. The atlas holds each pixel
   premultiplied and the =Symbol= its bytes as handed in.
 - *The spike*, natively and in Chrome's WebGL2, a key and flag for each:
-  - /Markers/: the county centroids as a colour marker and as a mask in
+  - /Markers/ (run 2026-11-21, natively and in Chrome's WebGL2;
+    =--check-markers=, K in the browser, M to cycle): the county centroids
+    as a colour marker and as a mask in
     three classes' colours, rotated against the map and against the screen
     while the camera turns. A marker over a tile edge is whole at every
     zoom, and so is a pin anchored at its tip and turning with the map; a
@@ -562,10 +571,17 @@ Ruled out:
   =--screenshot= of the same view show the same markers, dashes and hatch.
 - *Mask support* in the viewers SVG output is read by: browsers, and a
   rasterizer such as =resvg=. =mask-type: alpha= is the part to check.
+  Checked 2026-11-21 in WebKit (macOS Quick Look): the spike's pins match
+  its screenshot. =resvg= is not checked yet; the white PNG makes a
+  luminance mask agree anyway.
 - *Points in two guard bands.* Nothing clips the SVG writer's output by
   tile, so a point held by two tiles may be written twice. Invisible for an
   opaque dot; a translucent marker would show it. Check, and if so, write a
-  point only from the tile whose own area holds it.
+  point only from the tile whose own area holds it. Checked when built: it
+  was written twice, and is now written by the tile whose own area holds
+  it, half open so a point on an edge has one tile. The cost: a point just
+  outside every tile drawn, whose marker reaches onto the page, is lost at
+  the page's edge.
 - *Vector symbols* (step 7): unit tests of the parser against every
   command, absolute and relative, and arcs; a single-path pin from a
   public-domain icon set (a filled outer contour with a hole, cubic curves)
