@@ -7,7 +7,9 @@
 ** STATUS -- steps 0 to 6 decided 2026-11-20 (user decision), building
 Written 2026-11-19 as a proposal. § OPEN QUESTIONS 1 to 6 are decided, and
 steps 0 to 6 are being built for 0.3.0, on the =custom-symbols= branch. Step
-0 is built (2026-11-20). Step 7, vector symbols, waits on
+0 is built (2026-11-20). The atlas's padding and mipmaps, its
+premultiplied pixels and its limits are decided for step 1 (2026-11-21).
+Step 7, vector symbols, waits on
 § OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
 symbol at a time. Markers, dashes and pattern fills are three parts that
 share an atlas and a palette layout, so each can be built once the shared
@@ -87,6 +89,22 @@ Measured against =src/= at 0.2.1:
   id, so the SVG writer and the GPU agree on ids without a GPU in the room.
   An id is never reused within a =Symbols=; removing a symbol frees its
   space at the next repack.
+- *Ids and the atlas have limits.* Decided 2026-11-21 (user decision).
+  - /The atlas is at most 2048 x 2048/, the largest texture WebGL2
+    promises. An image that can't fit is an error naming it. Space, not
+    ids, bounds the symbols held at once: with their padding, 784 images of
+    64 pixels or 2,601 of 32.
+  - /Ids run out after 65,536 adds to one =Symbols=/: every =add= takes
+    one, a symbol added again at another size included, and =remove=
+    gives none back, so a stale palette can't draw whatever took a removed
+    symbol's place. The limit is nazca's, from the =u16=; the embedder
+    reaches it only by adding and removing over a long session (50 markers
+    added again at each of 40 zoom thresholds take 2,000), and starts a new
+    =Symbols= and writes its palettes again. Vector symbols (step 7) stay
+    sharp at any size and need no adding again.
+  Ruled out: reusing an id once the embedder says no palette names it, an
+  API to call correctly for a limit not likely met; =u32= ids, which no
+  table of 256 x 256 covers.
 - *The images are larger than they are drawn.* The embedder rasterizes at
   the device's pixel ratio, or more for a symbol it will draw at several
   sizes, and gives that as the symbol's scale: image pixels per drawn
@@ -97,6 +115,40 @@ Measured against =src/= at 0.2.1:
   scale, it blurs: the embedder adds it again at a larger size, and a
   palette can be asked which classes draw a symbol past that size, as
   =Symbol::facets= names faceted curves.
+- *Mipmaps stop at a quarter.* Decided 2026-11-21 (user decision). The
+  mipmaps are built from the whole atlas, so a level whose texels average
+  across two symbols' slots mixes one symbol's pixels into the other's
+  edge: a faint rim of a neighbour's colour on a marker drawn small.
+  Clamping the lookup to a symbol's rectangle doesn't prevent it, since the
+  texel inside the rectangle already holds the neighbour. So each image has
+  4 transparent pixels of padding, each slot starts on a multiple of 4, and
+  the texture stops at level 2 (=TEXTURE_MAX_LEVEL=): a level-2 texel is an
+  aligned 4 x 4 block, inside one slot or in padding, never across two. A
+  symbol drawn at a quarter of its pixels divided by its scale or larger is
+  smooth; smaller, it samples level 2 sparsely and can shimmer, and the
+  embedder adds it again at a smaller size, as it does for one drawn too
+  large. Padding of 8 and level 3 would hold to an eighth, for slots of
+  about 56% more area than the image (a 64-pixel image in an 80-pixel
+  slot) where 4 costs about 27% (72). Only markers drawn small meet the
+  floor, as on a zoom curve zoomed out; print draws symbols large.
+- *The atlas is premultiplied.* Decided 2026-11-21 (user decision). A
+  symbol arrives with straight alpha, as PNGs, a canvas's =getImageData=
+  and =Style='s colours have it, and its transparent pixels are usually
+  black. Filtering averages each channel on its own, at every mipmap and
+  between texels at full size, so a white edge beside a transparent pixel
+  averages to (0.5, 0.5, 0.5, 0.5): grey at half opacity, a dark rim
+  around a white icon. Premultiplied, the same texel is white at half
+  opacity. So =Symbols= multiplies each pixel's colour by its alpha as it
+  packs the atlas, and the marker and pattern shaders divide by alpha after
+  sampling, so blending stays as it is (straight =SRC_ALPHA=). A =Symbol=
+  keeps the embedder's bytes, which a repack needs anyway, and the SVG
+  writer's PNGs are written from them, exact. Premultiplying in 8 bits
+  coarsens the colour of nearly transparent pixels (at alpha 3/255 a
+  channel keeps 4 levels), which is not seen. A mask uses only its alpha
+  and is unaffected. Ruled out: filling transparent pixels with the nearest
+  visible colour, which fails where two colours meet a transparent area,
+  and asking the embedder for premultiplied pixels, which a canvas doesn't
+  give.
 - *=Style= gains three optional fields*:
   - =marker: Option<Marker>=: a =SymbolId=, a rotation in degrees, and
     whether that rotation is against the map (turns as the camera turns)
@@ -122,11 +174,16 @@ Measured against =src/= at 0.2.1:
   (id, rotation, alignment), two dash rows (eight lengths), and a pattern
   row (id, repeat size, and the dash phase and dash count in its last two
   channels). Restyling is still one upload; a class's marker or dash
-  changes with no mesh touched.
+  changes with no mesh touched. An id is written as id + 1, so 0 is no
+  marker or no pattern and a class left at =Style::default()= is all zeros
+  and draws nothing, as now; an =f32= holds every =u16= exactly.
 - *=GpuSymbols= is the atlas on the GPU*: an =RGBA8= texture with mipmaps,
   and an =RGBA32F= table of each id's rectangle in it. Adding a symbol
   re-uploads both. A palette names symbols by id, not by rectangle, so a
-  repack touches no palette and no mesh.
+  repack touches no palette and no mesh. The table is 256 wide, id /n/ in
+  column /n/ % 256 of row /n/ / 256, and only as tall as the highest id's
+  row: a row of 4 KB for a few hundred ids, 1 MB at most, and never past
+  WebGL2's texture limit as a row of 65,536 would be.
 
 Ruled out:
 - *Symbols in the palette itself.* A class would carry its own pixels, so
@@ -414,8 +471,9 @@ Ruled out:
 4. *Pattern fills*: the anchor uniform, =FILL_FS='s pattern sample,
    =<pattern>= in SVG.
 5. *=Symbol::from_svg=* behind the =symbols= feature (§ OPEN QUESTIONS 1).
-6. *The README* (a section on symbols: kinds, sizes, the guard band rule,
-   how round ends lengthen dashes, what SVG output writes; its palette
+6. *The README* (a section on symbols: kinds, sizes and the quarter floor
+   on drawing them small, the guard band rule, how round ends lengthen
+   dashes, what SVG output writes; its palette
    example built from =Style::default()= by assignment; its setup building
    a =gl::Context= in place of a =glow= one) and *a release*, 0.3.0 as
    § OPEN QUESTIONS 6 says, its notes covering both breaks.
@@ -426,8 +484,10 @@ Ruled out:
 
 ** CHECKS
 - *Packing*: unit tests in =symbol.rs=. Ids stay stable across adds and a
-  repack; rectangles never overlap and keep their padding; an image larger
-  than the atlas is an error naming it.
+  repack; rectangles never overlap, keep their padding of 4 and start on a
+  multiple of 4; an image larger than the atlas is an error naming it, and
+  an add past the last id is an error too. The atlas holds each pixel
+  premultiplied and the =Symbol= its bytes as handed in.
 - *The spike*, natively and in Chrome's WebGL2, a key and flag for each:
   - /Markers/: the county centroids as a colour marker and as a mask in
     three classes' colours, rotated against the map and against the screen
@@ -435,6 +495,10 @@ Ruled out:
     zoom, and so is a pin anchored at its tip and turning with the map; a
     palette whose pin reaches past the guard band only when turned is
     refused. A click on its transparent corner picks the county under it.
+    A marker packed beside one of a contrasting colour, drawn at a quarter
+    of its pixels, shows no rim of its neighbour's colour, and a white
+    colour marker on transparent pixels stored black shows no grey rim at
+    that size or at full size between pixels.
   - /Dashes/: county outlines dashed and dotted. The pattern runs on
     across tile edges when the spike passes line starts, and restarts
     without them; it doesn't crawl as the map pans.
