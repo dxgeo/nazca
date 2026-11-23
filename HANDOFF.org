@@ -18,7 +18,8 @@ unreleased:
   last feature fed that outlines it (§ OPEN QUESTIONS 9). Checked natively
   and in Chrome's WebGL2 by the spike's dash check (=--check-dashes=, X in
   the browser).
-- *Step 3's two additions*, built 2026-11-23 and checked natively:
+- *Step 3's two additions*, built 2026-11-23 and checked natively and in
+  Chrome's WebGL2:
   - /A far line start keeps its phase/: =Mesh::distances= are =f64=, and
     the upload gives each run of chained segments a shared =f32= base and
     each segment its offset (=SEGMENT_BYTES= 40). No jitter between
@@ -31,14 +32,9 @@ unreleased:
 § CHECKS (/Dashes/, /A far line start/) has the runs and numbers.
 
 ** NEXT SESSION
-1. *Run the dash check in Chrome's WebGL2.* The segment instance changed
-   (two more attributes, =a_base= and =a_offset=, locations 4 to 7), so
-   the browser should see the same report as natively. =spike-web/pkg= is
-   built from this code. Then record it in § CHECKS where the two
-   additions say /Chrome's WebGL2 not run yet/.
-2. *Step 4, pattern fills*: the anchor uniform, =FILL_FS='s pattern
-   sample with =textureGrad=, =<pattern>= in SVG. § Pattern fills and its
-   § CHECKS entry have the design.
+*Step 4, pattern fills*: the anchor uniform, =FILL_FS='s pattern sample
+with =textureGrad=, =<pattern>= in SVG. § Pattern fills and its § CHECKS
+entry have the design.
 
 ** ALSO OPEN
 - *The crawl check hasn't run.* § CHECKS asks that dashes don't crawl as

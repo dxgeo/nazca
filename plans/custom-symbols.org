@@ -16,7 +16,8 @@ markers are byte-identical to step 1's. Their SVG markup moved to step 5
 (shared borders drawn once, § OPEN QUESTIONS 9), is built (2026-11-23)
 and checked natively and in Chrome's WebGL2. Its two additions, decided
 2026-11-23 (user decision) from its measurements (§ CHECKS), are built
-(2026-11-23) and checked natively: the far line start's jitter cured by a
+(2026-11-23) and checked natively and in Chrome's WebGL2: the far line
+start's jitter cured by a
 run's shared base, and =MeshBuilder::line_length=, measuring a line as
 nazca does, so a line start joins exactly. Step 4 is next. Step 7, vector
 symbols, waits on
@@ -737,7 +738,9 @@ Ruled out:
     seam's, jump 0.0 pixels at every level (the check fails past 0.01),
     beside the source-measured jumps above. A unit test cuts a wiggly line
     into three pieces measured by the next tile over and gets the whole
-    line's distances. Chrome's WebGL2 not run yet.
+    line's distances. The same report in Chrome's WebGL2 (2026-11-23),
+    the two tiles' pieces of the dashed line again matching it whole at
+    every pixel through the new segment layout.
   - /A far line start/: an =f32= distance loses the phase by about the
     distance in pixels times 6 x 10^-8 at each vertex: 0.2 pixels for a
     piece 1,000 km along its line at z18, 4 pixels for 5,000 km at z20. A
@@ -756,8 +759,11 @@ Ruled out:
     zoom 20 a local unit is 256 pixels, which the base multiplies by
     exactly, so the phase is off by 0.00; at 20.4 the scale rounds, off by
     0.99 at 1,000 km and 0.35 at 5,000, the same at every vertex of the
-    run, so a jump of about that where it meets the next tile's run.
-    Chrome's WebGL2 not run yet.
+    run, so a jump of about that where it meets the next tile's run. These
+    are worked in =f32= on the CPU as the shader works them, so Chrome's
+    WebGL2 (2026-11-23) repeats them by construction; what it checks is
+    that the shader draws through the new layout, which the dashed line's
+    pieces show.
   - /Patterns/: a hatch over a flat fill (two palettes), anchored to the map
     while panning, with no seam at tile edges or at the repeat, at z2 and
     z14.

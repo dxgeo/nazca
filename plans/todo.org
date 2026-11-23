@@ -13,5 +13,5 @@ The v1 slice is built.
   type, step 1 built as custom-symbols' step 0; ships with 0.3.0.
 - [ ] [[file:custom-symbols.org][custom-symbols.org]] -- markers, dashes and
   pattern fills, steps 0 to 6 for 0.3.0, steps 0 to 3 built with step 3's
-  two additions (their Chrome check pending; ../HANDOFF.org); next, step
-  4; vector symbols (step 7) later.
+  two additions; next, step 4 (../HANDOFF.org); vector symbols (step 7)
+  later.
