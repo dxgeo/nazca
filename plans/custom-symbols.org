@@ -5,14 +5,16 @@
 * Custom Symbols
 
 ** STATUS -- steps 0 to 6 decided 2026-11-20 (user decision), building
-Written 2026-11-19 as a proposal. § OPEN QUESTIONS 1 to 6 and 8 are decided, and
+Written 2026-11-19 as a proposal. § OPEN QUESTIONS 1 to 6, 8 and 9 are decided, and
 steps 0 to 6 are being built for 0.3.0, on the =custom-symbols= branch. Step
 0 is built (2026-11-20). Step 1 is built (2026-11-21), with the atlas's
 padding and mipmaps, its premultiplied pixels and its limits decided for
 it. Step 2 is built (2026-11-21): markers draw, pick and write SVG from
 pixels, natively and in Chrome's WebGL2, and the spike's views without
 markers are byte-identical to step 1's. Their SVG markup moved to step 5
-(§ OPEN QUESTIONS 8, decided 2026-11-22). Step 3 is next. Step 7, vector
+(§ OPEN QUESTIONS 8, decided 2026-11-22). Step 3 is next, reviewed
+2026-11-22: shared borders drawn once (§ OPEN QUESTIONS 9), and § Dashes,
+§ SVG output and § CHECKS corrected for it. Step 7, vector
 symbols, waits on
 § OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
 symbol at a time. Markers, dashes and pattern fills are three parts that
@@ -278,13 +280,32 @@ Ruled out:
   so the phase follows the geometry the embedder handed in rather than
   restarting at nazca's own clip. =Mesh= becomes =#[non_exhaustive]= with
   it, as only =MeshBuilder= builds one. A segment instance carries its
-  start's distance (=SEGMENT_BYTES= 24 to 28). The shader gets the rest
-  from the segment's length.
+  start's distance (=SEGMENT_BYTES= 24 to 28, and 36 with a shared
+  border's partner, below). The shader gets the rest from the segment's
+  length.
+- *Clipped rings carry their distances through clipping.* Lines are
+  clipped a segment at a time (=end_line_run=) and take the distance at
+  each cut by interpolation. A ring is rebuilt by Sutherland--Hodgman
+  (=clip_ring=), so each point carries its distance as a third coordinate
+  through the four passes, interpolated at each intersection. An
+  intersection on the ring's closing edge interpolates towards the ring's
+  length, not towards 0. A vertex's distance need only be right for the
+  edge leaving it: edges along the clip boundary are not outlined, so
+  theirs are never read.
 - *=MeshBuilder::set_line_start(distance)=*, in map units, before a
   feature: where its first vertex lies along the whole line. An embedder
   whose tiles hold pieces of longer lines passes each piece's offset, and
-  dashes run on across tile edges without a seam. Without it each piece
-  starts at 0.
+  dashes run on across tile edges. Without it each piece starts at 0. The
+  seam is only as close as the embedder's start is to nazca's own measure,
+  which runs along the line as snapped and decimated at the tile's level:
+  on a wiggly line at a low zoom, snapping drops the wiggles finer than its
+  grid, so the measured length falls short of the source's and the seam
+  jumps by the difference. Measuring the source's own geometry instead
+  would stretch each dash by the line's simplification and part the screen
+  from SVG output, whose =stroke-dasharray= dashes the path as drawn. A
+  feature handed whole to every tile needs no start: each tile at a level
+  measures it from the same start along the same grid, and they agree
+  exactly. The README says so.
 - *=LINE_FS= dashes in pixels.* From the segment's start distance, the
   fragment's position along the segment and the zoom, it finds the
   distance to the nearest /on/ interval of the pattern and keeps what lies
@@ -302,6 +323,40 @@ Ruled out:
 - *Picking ignores dashes*: a click in a gap still picks the line. A gap
   is a few pixels, and a line that can't be clicked between its dashes is
   harder to use than one that can.
+- *A shared border is drawn once, by the last feature to outline it*
+  (§ OPEN QUESTIONS 9). Two polygons each outline the border they share,
+  running it opposite ways from their own ring starts, so dashed it would
+  be two patterns out of phase, garbled at any opacity; undashed and
+  translucent, it blends twice (plans/rendering.org § BACKENDS, its known
+  limits).
+  - /Matched by overlap/: =MeshBuilder::finish= finds ring edges that
+    overlap along one grid line, exact on the integer grid where
+    neighbours already snap alike, and splits each at the other's ends, so
+    the pieces of two rings pair one to one. Not by equal ends: a county's
+    one straight edge often meets two neighbours' at a T-junction, and
+    decimation drops a junction collinear in one ring but not the other.
+  - /Both copies stay; the earlier is suppressed/: the earlier copy of a
+    pair, in feed order, carries its partner's feature id and class, and
+    the vertex shader collapses its quad, as =STATE= does, where the
+    partner is shown and its class draws a line (a width and an alpha over
+    0, read from the palette at draw time, so restyling touches no mesh).
+    Each copy keeps its own class, phase and feature id: drawn through a
+    state only the earlier feature holds, its own copy draws, in its own
+    style. A pick takes the copy drawn, the last, as it does now. The
+    =SvgWriter= applies the same rule.
+  - /Classes don't matter/: two classes share a border whatever their
+    dashes, widths or colours, the last drawn showing. A thick outline fed
+    before a thin neighbour loses the stretches they share: drawing
+    emphasis last, fed last or as a state layer, is the embedder's
+    responsibility, and the README says so.
+  - /Phase/: a piece's dashes come from the copy drawn, its ring's
+    distance on the whole snapped ring, the same in every tile at a level.
+    The pattern jumps only where the copy drawn changes, at a junction.
+  - /Tiles agree when fed alike/: "last" is the order a tile was fed, so
+    every tile is fed its features in one order, as which of two outlines
+    shows on a border already needs.
+  - /Pre-clipped sources/ (MVT) start a ring where the source cut it, so
+    the phase restarts in each tile, as lines without starts do.
 
 *** Pattern fills
 - *=FILL_FS= samples a pattern* where the class has one: the repeat is
@@ -426,9 +481,14 @@ size it was drawn at, or is built from data.
 - *Dashes* are =stroke-dasharray= and =stroke-dashoffset=. SVG restarts a
   dash pattern at each subpath, so a chain whose line starts part-way
   through the pattern is a =<path>= of its own with its own offset, and only
-  chains that start at the pattern's start share the class's one path. The
-  cost: where two such paths meet, a translucent dashed line blends twice,
-  which one path per class exists to avoid.
+  chains that start at the pattern's start share the class's one path.
+  Drawn tile by tile, a layer's lines would overlap across the whole guard
+  band, a translucent dashed line blending twice along it in two paths, so
+  each segment is written clipped to its tile's own area, half open, as a
+  point is. A dash cut at a tile edge is then two capped halves whose
+  union looks whole; only a translucent dash blends twice under the caps,
+  as at any join. A shared border's earlier copy is left out as on screen
+  (§ Dashes).
 - *Markup comes only from =usvg=* (§ OPEN QUESTIONS 8): one root of a
   known size and no prolog, no =<style>=, no scripts or external
   references, and its ids prefixed (=WriteOptions::id_prefix=) by a hash of
@@ -539,6 +599,19 @@ Ruled out:
    =feColorMatrix= turning a mask's markup white, for icons in literal
    colours where =mask-type= isn't read; some PDF and print converters
    rasterize filters.
+9. *Shared borders* (§ Dashes). Decided 2026-11-22 (user decision): a
+   border two polygons share is drawn once, by the last feature fed that
+   outlines it, always, whatever the two classes' dashes, widths or
+   colours; drawing emphatic features last is the embedder's
+   responsibility. Ruled out: only when either class is dashed, which
+   leaves undashed translucent borders blending twice; keeping the lower
+   feature id's copy, which picks a different feature than a click does
+   now; arcs between junctions measured from a fixed end (as TopoJSON
+   stores them), whose ends depend on which polygons a tile holds, so
+   neighbouring tiles disagree at the seam; keeping both copies with one
+   phase copied onto the other, which still blends twice; and a phase from
+   map position, which can't run on along a line and restarts at every
+   vertex.
 
 ** STEPS
 0. *Nazca's own GL context* (plans/gl-context.org § STEP 1), first, so the
@@ -555,8 +628,15 @@ Ruled out:
    =svg.rs= module docs. Built 2026-11-21, with the renderer holding the
    atlas (=Renderer::set_symbols=), =Palette::check_reach=, and points
    written once in SVG; markup moved to step 5 (§ OPEN QUESTIONS 8).
-3. *Dashes*: =Mesh::distances= and =set_line_start=, the segment instance,
-   =LINE_FS='s dash test, =stroke-dasharray= in SVG.
+3. *Dashes*: =Mesh::distances= and =set_line_start=, distances through
+   ring clipping, shared borders matched and the earlier copy suppressed
+   (§ OPEN QUESTIONS 9), first, then the segment instance, =LINE_FS='s dash
+   test, =stroke-dasharray= in SVG with lines clipped to the tile's own
+   area. =Mesh= becomes =#[non_exhaustive]=, so the spike's =Mesh= struct
+   literal (=examples/spike/tiles.rs=) builds through a constructor or
+   =MeshBuilder=. Docs: =prepare.rs=, =gl.rs= and =svg.rs= module docs,
+   the known limits in plans/rendering.org § BACKENDS (a shared border no
+   longer outlined twice).
 4. *Pattern fills*: the anchor uniform, =FILL_FS='s pattern sample,
    =<pattern>= in SVG.
 5. *=Symbol::from_svg=* behind the =symbols= feature (§ OPEN QUESTIONS 1),
@@ -593,14 +673,23 @@ Ruled out:
     of its pixels, shows no rim of its neighbour's colour, and a white
     colour marker on transparent pixels stored black shows no grey rim at
     that size or at full size between pixels.
-  - /Dashes/: county outlines dashed and dotted. The pattern runs on
-    across tile edges when the spike passes line starts, and restarts
-    without them; it doesn't crawl as the map pans.
+  - /Dashes/: county outlines dashed and dotted, each shared border one
+    pattern, not two out of phase, and a hovered county's dashed outline
+    whole through a state. A translucent undashed outline no darker on a
+    shared border than elsewhere; a T-junction on a straight border
+    matched. The spike has no lines, so a synthetic one, cut into pieces
+    with starts: the pattern runs on across tile edges, the jump at each
+    seam measured, not assumed 0, at a low zoom on a wiggly line; without
+    starts it restarts. It doesn't crawl as the map pans.
   - /A far line start/: an =f32= distance loses the phase by about the
     distance in pixels times 6 x 10^-8 at each vertex: 0.2 pixels for a
     piece 1,000 km along its line at z18, 4 pixels for 5,000 km at z20. A
     long line with a large start, at the grid's deepest level, shows
-    whether the jump is seen; if it is, the start travels as two =f32=.
+    whether the jitter is seen. If it is, two =f32= won't cure it: the
+    shader's product of the distance and the scale loses as much again.
+    The cure is a base a run of segments shares and an offset from it
+    (=SEGMENT_BYTES= 4 more): the run then carries one error, a jump at its
+    seam, with no jitter between its vertices.
   - /Patterns/: a hatch over a flat fill (two palettes), anchored to the map
     while panning, with no seam at tile edges or at the repeat, at z2 and
     z14.
@@ -648,4 +737,5 @@ Ruled out:
   time a zoom curve on =point_size= costs the atlas route.
 - *Cost*: a frame of the 2,500-point grid as dots and as markers, and the
   mesh bytes and prepare time of a large line layer with and without
-  distances (§ OPEN QUESTIONS 4).
+  distances (§ OPEN QUESTIONS 4); the counties' prepare time and segment
+  bytes with and without shared borders matched (§ OPEN QUESTIONS 9).
