@@ -5,14 +5,15 @@
 * Custom Symbols
 
 ** STATUS -- steps 0 to 6 decided 2026-11-20 (user decision), building
-Written 2026-11-19 as a proposal. § OPEN QUESTIONS 1 to 6 are decided, and
+Written 2026-11-19 as a proposal. § OPEN QUESTIONS 1 to 6 and 8 are decided, and
 steps 0 to 6 are being built for 0.3.0, on the =custom-symbols= branch. Step
 0 is built (2026-11-20). Step 1 is built (2026-11-21), with the atlas's
 padding and mipmaps, its premultiplied pixels and its limits decided for
-it. Step 2 is built (2026-11-21) but for SVG markup, which waits on a
-question (§ SVG output): markers draw, pick and write SVG from pixels,
-natively and in Chrome's WebGL2, and the spike's views without markers are
-byte-identical to step 1's. Step 7, vector symbols, waits on
+it. Step 2 is built (2026-11-21): markers draw, pick and write SVG from
+pixels, natively and in Chrome's WebGL2, and the spike's views without
+markers are byte-identical to step 1's. Their SVG markup moved to step 5
+(§ OPEN QUESTIONS 8, decided 2026-11-22). Step 3 is next. Step 7, vector
+symbols, waits on
 § OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
 symbol at a time. Markers, dashes and pattern fills are three parts that
 share an atlas and a palette layout, so each can be built once the shared
@@ -84,8 +85,8 @@ Measured against =src/= at 0.2.1:
     multiplies its alpha, so fading a class's fill fades its markers too.
   - /Mask/: only its alpha is used, tinted by a colour from the class. One
     hatch or one pin serves every colour a palette gives it.
-  It may also carry SVG markup, which only the SVG writer reads
-  (§ SVG output).
+  One built by =Symbol::from_svg= also carries =usvg='s markup for it,
+  which only the SVG writer reads (§ SVG output, § OPEN QUESTIONS 8).
 - *=Symbols= holds them by id.* =Symbols::add= returns a =SymbolId= (a
   =u16=) and packs the image into an atlas on the CPU, in shelves with a
   padding around each image. The atlas is plain bytes and a rectangle per
@@ -408,10 +409,12 @@ size it was drawn at, or is built from data.
 
 *** SVG output
 - *=SvgWriter::symbols(&Symbols)=* before the layers that use them. Each
-  symbol used is written once, in =<defs>=: as its SVG markup in a
-  =<symbol>= when it has some, or else as its pixels in an =<image>= with a
-  PNG data URL (written by a small encoder in the module: stored, not
-  compressed, so it needs no dependency).
+  symbol used is written once, in =<defs>=, filling the box of its pixels,
+  so the =<use>= that places it is the same either way: as its markup when
+  =Symbol::from_svg= built it, wrapped in an =<svg>= of the pixels' width
+  and height whose =viewBox= is =usvg='s size, or else as its pixels in an
+  =<image>= with a PNG data URL (written by a small encoder in the module:
+  stored, not compressed, so it needs no dependency).
 - *Markers* are =<use>= elements with the symbol's position, size and
   rotation. A mask marker is the class's colour through a =<mask>= of the
   symbol (=mask-type: alpha=). Built: a mask's PNG is written white with
@@ -426,9 +429,14 @@ size it was drawn at, or is built from data.
   chains that start at the pattern's start share the class's one path. The
   cost: where two such paths meet, a translucent dashed line blends twice,
   which one path per class exists to avoid.
-- *Markup is written as it is handed in.* Whether it is safe to put in a
-  document is the embedder's question, as nazca can't know where the
-  document goes. § OPEN QUESTIONS 1 has an option that answers it.
+- *Markup comes only from =usvg=* (§ OPEN QUESTIONS 8): one root of a
+  known size and no prolog, no =<style>=, no scripts or external
+  references, and its ids prefixed (=WriteOptions::id_prefix=) by a hash of
+  the markup, so two symbols' ids can't meet unless their content is the
+  same. A mask's markup is parsed with =Options::style_sheet= setting
+  =color: white=, so an icon painted in =currentColor= masks the same by
+  luminance as by alpha; one painted in literal colours relies on
+  =mask-type: alpha=.
 
 Ruled out:
 - *Markers as =<image>= only*, from the atlas's pixels. Every marker in a
@@ -449,7 +457,8 @@ Ruled out:
 ** OPEN QUESTIONS
 1. *Where SVG becomes pixels.* Decided 2026-11-19 (user decision): A, with
    B as an optional feature over it, both in 0.3.0.
-   - A. The embedder hands in pixels, and optionally markup. The default
+   - A. The embedder hands in pixels, and optionally markup (narrowed by
+     § OPEN QUESTIONS 8: markup only through B). The default
      build stays standard-library only. In a browser the embedder has an SVG
      renderer at hand (an =<img>= and a canvas); natively it needs its own.
    - B. A =symbols= feature (=resvg=, =usvg=, =tiny-skia=; pure Rust, builds
@@ -503,6 +512,33 @@ Ruled out:
    framebuffer, not nazca's, to choose. Between a feathered outline drawn
    outside the fill and rasterizing into the atlas, open until step 7's
    spike measures both (§ CHECKS).
+8. *Markup handed in by the embedder.* Decided 2026-11-22 (user decision):
+   markup only from =Symbol::from_svg=, so =Symbol= has no public markup
+   field, and a symbol without the =symbols= feature is written as a PNG.
+   Written as it is handed in, markup breaks the document in ways nazca
+   can't see without parsing it, the parser step 7 keeps to path data:
+   - /Fitting/: an icon's root has its own =width=, =height= and
+     =viewBox=; written into the pixels' box it draws at its own size, and
+     at another aspect it is letterboxed and its anchor drifts from the
+     screen's.
+   - /A whole document/: a file's =<?xml?>= or =<!DOCTYPE>= is invalid
+     inside another, and one unbalanced tag breaks every symbol, not its
+     own.
+   - /Ids/: exported icons are full of =id="a"=; two symbols with the same
+     id draw the first one's gradient or clip in both, silently.
+   - /=<style>=/: an exporter's =.cls-1= reaches every icon in the
+     document.
+   - /Masks/: a mask's PNG is written white so a viewer reading masks by
+     luminance agrees; markup in its own colours can't be.
+   - /Agreement/: markup and pixels handed in apart can differ in version,
+     crop or padding, and the SVG then doesn't match the screen.
+   =usvg='s rewrite settles all six (§ SVG output). Ruled out: a contract
+   for hand-made markup, which nazca can't check and which fails silently;
+   and no markup until step 7, which writes every marker in a vector layout
+   as a bitmap until then. Left until a viewer needs it: a
+   =feColorMatrix= turning a mask's markup white, for icons in literal
+   colours where =mask-type= isn't read; some PDF and print converters
+   rasterize filters.
 
 ** STEPS
 0. *Nazca's own GL context* (plans/gl-context.org § STEP 1), first, so the
@@ -516,14 +552,17 @@ Ruled out:
    =symbol.rs= module docs, plans/rendering.org § STYLING.
 2. *Markers*: the marker program and its four forms, picking by alpha, the
    guard band check, =<use>= and =<mask>= in SVG. Docs: =gl.rs= and
-   =svg.rs= module docs. Built 2026-11-21 but for SVG markup, with the
-   renderer holding the atlas (=Renderer::set_symbols=),
-   =Palette::check_reach=, and points written once in SVG.
+   =svg.rs= module docs. Built 2026-11-21, with the renderer holding the
+   atlas (=Renderer::set_symbols=), =Palette::check_reach=, and points
+   written once in SVG; markup moved to step 5 (§ OPEN QUESTIONS 8).
 3. *Dashes*: =Mesh::distances= and =set_line_start=, the segment instance,
    =LINE_FS='s dash test, =stroke-dasharray= in SVG.
 4. *Pattern fills*: the anchor uniform, =FILL_FS='s pattern sample,
    =<pattern>= in SVG.
-5. *=Symbol::from_svg=* behind the =symbols= feature (§ OPEN QUESTIONS 1).
+5. *=Symbol::from_svg=* behind the =symbols= feature (§ OPEN QUESTIONS 1),
+   and the SVG writer's =<defs>= writing its markup, wrapped to the
+   pixels' box, its ids prefixed, a mask's =currentColor= white
+   (§ OPEN QUESTIONS 8).
 6. *The README* (a section on symbols: kinds, sizes and the quarter floor
    on drawing them small, the guard band rule, how round ends lengthen
    dashes, what SVG output writes; its palette
@@ -569,6 +608,12 @@ Ruled out:
   used, =<use>= placement and rotation, a mask's colour, a =<pattern>='s
   anchor and repeat, a dashed chain's offset. The spike's =--svg= and
   =--screenshot= of the same view show the same markers, dashes and hatch.
+- *Markup* (step 5): unit tests in =svg.rs=. A symbol from =from_svg= is
+  written as its markup and one from =Symbol::new= as a PNG, with the same
+  =<use>=; two icons that both define =id="a"= keep their own gradients; a
+  =currentColor= mask icon is white in its =<mask>=; a root at another
+  aspect than its pixels fills their box. The spike's =--svg= of a pin
+  from markup matches its =--screenshot=, in a browser and in =resvg=.
 - *Mask support* in the viewers SVG output is read by: browsers, and a
   rasterizer such as =resvg=. =mask-type: alpha= is the part to check.
   Checked 2026-11-21 in WebKit (macOS Quick Look): the spike's pins match

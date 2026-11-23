@@ -68,9 +68,6 @@ pub struct Symbol {
     /// width and height from its top left. The centre by default.
     pub anchor: [f32; 2],
     pub kind: Kind,
-    /// SVG markup for the same image, which only the SVG writer reads: it is
-    /// written as it is handed in.
-    pub svg: Option<String>,
 }
 
 impl Symbol {
@@ -81,7 +78,7 @@ impl Symbol {
         if width == 0 || height == 0 || pixels.len() as u64 != width as u64 * height as u64 * 4 {
             return None;
         }
-        Some(Symbol { width, height, pixels, scale: 1.0, anchor: [0.5, 0.5], kind: Kind::Colour, svg: None })
+        Some(Symbol { width, height, pixels, scale: 1.0, anchor: [0.5, 0.5], kind: Kind::Colour })
     }
 
     pub fn width(&self) -> u32 {
