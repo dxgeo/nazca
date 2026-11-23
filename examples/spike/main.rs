@@ -32,8 +32,9 @@
 //! (the grid's level, fractional), as a tile-edge check aims a view.
 //! `--outlines` (`dashed`, `dotted` or `translucent`) opens with those
 //! outlines, as D cycles them. `--check-dashes` checks shared borders and
-//! dashes by reading the framebuffer, measures line starts' seams, `f32`
-//! distances' jitter and the cost of matching borders, reports and exits.
+//! dashes by reading the framebuffer, measures line starts' seams, the
+//! phase of a line far along it and the cost of matching borders, reports
+//! and exits.
 
 mod data;
 mod tiles;

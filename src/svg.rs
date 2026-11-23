@@ -235,7 +235,7 @@ impl SvgWriter {
                 if let Some(c) = chain.take() {
                     c.finish(palette, &mut self.lines, &mut self.runs);
                 }
-                let along = mesh.distance(a) as f64 + (p[0] - la[0]).hypot(p[1] - la[1]);
+                let along = mesh.distance(a) + (p[0] - la[0]).hypot(p[1] - la[1]);
                 let [x, y] = to_screen(p);
                 chain = Some(Chain { class, first: (p == la).then_some(a), last: None, along_px: along * unit_px, d: format!("M{},{}", num(x), num(y)) });
             }

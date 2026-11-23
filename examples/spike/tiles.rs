@@ -490,10 +490,11 @@ pub fn check_state(gl: &Context, renderer: &Renderer, size: [u32; 2]) -> Result<
 ///
 /// Then measures what a picture can't settle: how far a line start
 /// measured on a wiggly coastline misses nazca's own measure at a seam,
-/// the jitter `f32` distances give a line 1,000 and 5,000 km along at the
-/// grid's deepest level, and what matching shared borders costs to
-/// prepare, timed by `clock` in milliseconds (`std::time::Instant` panics
-/// in a browser).
+/// and that one measured by `MeshBuilder::line_length` in another tile at
+/// the level doesn't; how far the phase of a line 1,000 and 5,000 km along
+/// at the grid's deepest level is off, and how much it jitters between
+/// vertices; and what matching shared borders costs to prepare, timed by
+/// `clock` in milliseconds (`std::time::Instant` panics in a browser).
 pub fn check_dashes(gl: &Context, renderer: &Renderer, counties: &Counties, size: [u32; 2], clock: &dyn Fn() -> f64) -> Result<String, String> {
     let [w, h] = size.map(|v| v as usize);
     let camera = Camera::new([200.0, 100.0], 1.0, size);
@@ -631,42 +632,50 @@ pub fn check_dashes(gl: &Context, renderer: &Renderer, counties: &Counties, size
     let grid = TileGrid::web_mercator(512, 20).unwrap();
     let tile_at = |z: u8, p: [f64; 2]| grid.tiles_in(z, Rect { min: p, max: p }).next().unwrap();
 
-    // The coastline cut at its middle vertex, the second piece starting
-    // where the first ends by the coastline's own length.
+    // A line cut after `piece`, the second piece starting where the first
+    // ends: by its own length in the source, and by its length as
+    // `line_length` measures it in the tile where the first piece starts.
+    // The seam's tile, fed the first piece, measures what the line handed
+    // in whole would have there.
+    let seams = |piece: &[[f64; 2]], levels: &[u8]| -> Result<(Vec<String>, Vec<String>), String> {
+        let source: f64 = piece.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+        let (mut by_source, mut by_nazca) = (Vec::new(), Vec::new());
+        for &z in levels {
+            let mut b = MeshBuilder::for_tile(&grid, tile_at(z, piece[piece.len() - 1])).unwrap();
+            b.begin_line();
+            b.points(piece);
+            b.end_line();
+            let mesh = b.finish();
+            let whole = *mesh.distances.last().unwrap() * mesh.frame.half_span;
+            let measured = MeshBuilder::for_tile(&grid, tile_at(z, piece[0])).unwrap().line_length(piece);
+            let res = grid.resolution(z).unwrap();
+            if ((measured - whole) / res).abs() > 0.01 {
+                return Err(format!("a start measured by line_length jumps {:.3} px at its seam at z{z}", (measured - whole) / res));
+            }
+            by_source.push(format!("z{z} {:.1}", (source - whole) / res));
+            by_nazca.push(format!("{:.1}", (measured - whole) / res));
+        }
+        Ok((by_source, by_nazca))
+    };
     let ring = counties.longest_ring("Barnstable").ok_or("no Barnstable")?;
-    let m = ring.len() / 2;
-    let length: f64 = ring[..=m].windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
-    let mut jumps = Vec::new();
-    for z in [6, 8, 10, 12, 14, 16] {
-        let id = tile_at(z, ring[m]);
-        let mut b = MeshBuilder::for_tile(&grid, id).unwrap();
-        b.begin_line();
-        b.points(&ring[..=m]);
-        b.end_line();
-        let mesh = b.finish();
-        let measured = *mesh.distances.last().unwrap() as f64 * mesh.frame.half_span;
-        jumps.push(format!("z{z} {:.1}", (length - measured) / grid.resolution(z).unwrap()));
-    }
-    report.push(format!("Barnstable's coast, {} vertices, cut at its middle: the seam jumps (px) {}", ring.len(), jumps.join(", ")));
+    let (by_source, by_nazca) = seams(&ring[..=ring.len() / 2], &[6, 8, 10, 12, 14, 16])?;
+    report.push(format!(
+        "Barnstable's coast, {} vertices, cut at its middle: the seam jumps (px) {} measured on the source, {} by line_length",
+        ring.len(),
+        by_source.join(", "),
+        by_nazca.join(", ")
+    ));
 
     // The fixture's coasts are simplified; a line wiggling 5 m either side
     // every 10 m, for 20 km, is what a detailed source hands in.
     let origin = counties.centre(0);
     let wiggly: Vec<[f64; 2]> = (0..=2000).map(|i| [origin[0] + i as f64 * 10.0, origin[1] + if i % 2 == 0 { -5.0 } else { 5.0 }]).collect();
-    let length: f64 = wiggly.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
-    let end = wiggly[wiggly.len() - 1];
-    let mut jumps = Vec::new();
-    for z in [8, 10, 12, 14, 16, 18] {
-        let id = tile_at(z, end);
-        let mut b = MeshBuilder::for_tile(&grid, id).unwrap();
-        b.begin_line();
-        b.points(&wiggly);
-        b.end_line();
-        let mesh = b.finish();
-        let measured = *mesh.distances.last().unwrap() as f64 * mesh.frame.half_span;
-        jumps.push(format!("z{z} {:.1}", (length - measured) / grid.resolution(z).unwrap()));
-    }
-    report.push(format!("a 20 km line wiggling 5 m every 10 m: the seam after it jumps (px) {}", jumps.join(", ")));
+    let (by_source, by_nazca) = seams(&wiggly, &[8, 10, 12, 14, 16, 18])?;
+    report.push(format!(
+        "a 20 km line wiggling 5 m every 10 m: the seam after it jumps (px) {} measured on the source, {} by line_length",
+        by_source.join(", "),
+        by_nazca.join(", ")
+    ));
 
     // A wiggling line on the grid's own points, so snapping moves nothing
     // and the distances nazca measures in `f64` are known exactly.
@@ -683,21 +692,30 @@ pub fn check_dashes(gl: &Context, renderer: &Renderer, counties: &Counties, size
         b.points(&points);
         b.end_line();
         let mesh = b.finish();
-        let unit = (mesh.frame.half_span / res) as f32;
-        let (mut exact, mut worst, mut jitter, mut last) = (start, 0.0f64, 0.0f64, None::<f64>);
-        for (i, &d) in mesh.distances.iter().enumerate() {
-            if i > 0 {
-                exact += (points[i][0] - points[i - 1][0]).hypot(points[i][1] - points[i - 1][1]);
+        // One run, its base the first distance as an `f32`, as
+        // `Renderer::upload` splits it.
+        let base = mesh.distances[0] as f32;
+        // At the level's own zoom a local unit is 256 pixels, a power of two
+        // the base multiplies by exactly; past it, by a scale that rounds.
+        for zoom in [z as f64, z as f64 + 0.4] {
+            let res = res / (zoom - z as f64).exp2();
+            let unit = (mesh.frame.half_span / res) as f32;
+            let (mut exact, mut worst, mut jitter, mut last) = (start, 0.0f64, 0.0f64, None::<f64>);
+            for (i, &d) in mesh.distances.iter().enumerate() {
+                if i > 0 {
+                    exact += (points[i][0] - points[i - 1][0]).hypot(points[i][1] - points[i - 1][1]);
+                }
+                // As the shader multiplies and adds, in `f32`.
+                let offset = (d - base as f64) as f32;
+                let err = ((base * unit) as f64 + (offset * unit) as f64) - exact / res;
+                worst = worst.max(err.abs());
+                if let Some(l) = last {
+                    jitter = jitter.max((err - l).abs());
+                }
+                last = Some(err);
             }
-            // As the shader multiplies, in `f32`.
-            let err = (d * unit) as f64 - exact / res;
-            worst = worst.max(err.abs());
-            if let Some(l) = last {
-                jitter = jitter.max((err - l).abs());
-            }
-            last = Some(err);
+            report.push(format!("a line {} km along at zoom {zoom}: phase off by up to {worst:.2} px, {jitter:.2} px between vertices", start / 1000.0));
         }
-        report.push(format!("a line {} km along at z{z}: phase off by up to {worst:.2} px, {jitter:.2} px between vertices", start / 1000.0));
     }
 
     // Matching shared borders, over the counties' tiles at z10.
@@ -717,7 +735,7 @@ pub fn check_dashes(gl: &Context, renderer: &Renderer, counties: &Counties, size
     report.push(format!(
         "z10: {segments} outline segments, {paired} paired; feeding {feed:.1} ms, matching (finish) {finish:.1} ms; partners {} KB of {} KB of segments",
         segments * 8 / 1024,
-        segments * 36 / 1024
+        segments * 40 / 1024
     ));
     Ok(format!("dash check passed:\n  {}", report.join("\n  ")))
 }

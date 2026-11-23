@@ -29,7 +29,9 @@
 //! ([`Mesh::distances`]), measured along the snapped and decimated geometry
 //! before clipping, so a dash pattern follows the line handed in rather than
 //! restarting where nazca clipped it. A line handed in as pieces starts each
-//! from [`MeshBuilder::set_line_start`].
+//! from [`MeshBuilder::set_line_start`], measured by
+//! [`MeshBuilder::line_length`] so the pieces join exactly. Distances are
+//! `f64`, so a vertex far along a long line keeps its place in the pattern.
 //!
 //! *A border two rings share is drawn once* ([`Mesh::partners`]). Each ring
 //! outlines it, running it its own way from its own start, so drawn twice it
@@ -97,8 +99,10 @@ pub struct Mesh {
     pub ids: Vec<u32>,
     /// Empty, or one per vertex: how far along its line or ring it lies, in
     /// local units, where dash patterns are measured from. Empty reads as 0
-    /// throughout.
-    pub distances: Vec<f32>,
+    /// throughout. `f64`, since a vertex thousands of kilometres along its
+    /// line at a deep level is millions of pixels along, past what an `f32`
+    /// holds to a pixel.
+    pub distances: Vec<f64>,
     /// Empty, or one per outline segment: the later segment, by its index
     /// into `outlines` pairs, that draws the same stretch of a border two
     /// rings share, or [`Mesh::NO_PARTNER`]. A segment is drawn only where
@@ -134,12 +138,12 @@ impl Mesh {
     /// size to give [`crate::TileCache::insert`].
     pub fn byte_size(&self) -> usize {
         4 * (self.vertices.len() + self.fills.len() + self.outlines.len() + self.points.len() + self.ids.len())
-            + 4 * (self.distances.len() + self.partners.len())
-            + 8 * (self.rings.len() + self.polygons.len())
+            + 4 * self.partners.len()
+            + 8 * (self.distances.len() + self.rings.len() + self.polygons.len())
     }
 
     /// Vertex `i`'s distance along its line or ring.
-    pub(crate) fn distance(&self, i: u32) -> f32 {
+    pub(crate) fn distance(&self, i: u32) -> f64 {
         self.distances.get(i as usize).copied().unwrap_or(0.0)
     }
 
@@ -261,14 +265,37 @@ impl MeshBuilder {
     /// piece of, in map units, so a dash pattern runs on from the piece
     /// before. For the next line only; the one after starts at 0 again.
     ///
-    /// The seam is only as close as `distance` is to nazca's own measure,
-    /// which runs along the line as snapped and decimated at this tile's
-    /// level: snapping drops the wiggles finer than its grid and moves every
+    /// The seam joins exactly when `distance` is the pieces before measured
+    /// by [`MeshBuilder::line_length`], summed. Measured on the source's own
+    /// geometry it is only as close as that is to nazca's measure, which
+    /// runs along the line as snapped and decimated at this tile's level:
+    /// snapping drops the wiggles finer than its grid and moves every
     /// vertex, so on a line of many short segments the two part at any zoom,
     /// and the seam jumps by the difference. A line handed whole to every
     /// tile needs no start.
     pub fn set_line_start(&mut self, distance: f64) {
         self.line_start = distance / self.mesh.frame.half_span * self.half_cells;
+    }
+
+    /// The length of the line through `xy`, in map units, as this builder
+    /// measures it: along the line snapped to its grid and decimated, as
+    /// [`Sink::points`] would take it. The pieces of a longer line, each
+    /// measured so, give the next piece's start for
+    /// [`MeshBuilder::set_line_start`], and the pattern runs on across the
+    /// seam as if the line were handed in whole.
+    ///
+    /// The grid is fixed in map units for a level, so every tile at a level
+    /// measures a line alike: a piece may be measured by a builder for any
+    /// of them, once for the level. They part only for a point within
+    /// rounding of halfway between two grid points, which each tile's own
+    /// arithmetic may snap its own way.
+    pub fn line_length(&self, xy: &[[f64; 2]]) -> f64 {
+        let mut line = Vec::with_capacity(xy.len());
+        for &p in xy {
+            push_decimated(&mut line, 0, self.snap(p));
+        }
+        let steps = line.windows(2).fold(0.0, |d, w| d + (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]));
+        steps / self.half_cells * self.mesh.frame.half_span
     }
 
     /// The mesh, with the borders its rings share matched (see the module
@@ -295,7 +322,7 @@ impl MeshBuilder {
         let s = self.half_cells;
         self.mesh.vertices.extend_from_slice(&[(g[0] / s) as f32, (g[1] / s) as f32, self.class]);
         self.mesh.ids.push(self.feature);
-        self.mesh.distances.push((d / s) as f32);
+        self.mesh.distances.push(d / s);
         index
     }
 
@@ -436,7 +463,7 @@ impl MeshBuilder {
         let f = from as usize;
         let s = self.half_cells;
         let class = self.mesh.vertices[f * 3 + 2];
-        let d = self.mesh.distance(from) + (((g[0] - a[0]) as f64).hypot((g[1] - a[1]) as f64) / s) as f32;
+        let d = self.mesh.distance(from) + ((g[0] - a[0]) as f64).hypot((g[1] - a[1]) as f64) / s;
         self.mesh.vertices.extend_from_slice(&[(g[0] as f64 / s) as f32, (g[1] as f64 / s) as f32, class]);
         let id = self.mesh.ids[f];
         self.mesh.ids.push(id);
@@ -908,7 +935,7 @@ mod tests {
 
     /// The distances, in grid steps (also map units, with this frame).
     fn distances(m: &Mesh) -> Vec<f64> {
-        m.distances.iter().map(|&d| (d as f64 * 100.0 * 1000.0).round() / 1000.0).collect()
+        m.distances.iter().map(|&d| (d * 100.0 * 1000.0).round() / 1000.0).collect()
     }
 
     /// Outline segment `k`'s ends, in grid steps.
@@ -939,6 +966,36 @@ mod tests {
         let m = b.finish();
         assert_eq!(positions(&m), [[0.0, 0.0], [110.0, 0.0], [110.0, 20.0], [0.0, 20.0]]);
         assert_eq!(distances(&m), [0.0, 110.0, 210.0, 320.0]);
+    }
+
+    #[test]
+    fn a_line_in_measured_pieces_matches_it_whole() {
+        // Steps of 1.3 wiggling 2.5 snap to steps of 1 or 2 wiggling 3, so
+        // the source's own length is far from nazca's; none lies near
+        // halfway between grid points, nor in line with its neighbours.
+        let line: Vec<[f64; 2]> = (0..40).map(|i| [i as f64 * 1.3 - 40.05, if i % 2 == 0 { 0.2 } else { 2.7 }]).collect();
+        let mut b = builder();
+        b.begin_line();
+        b.points(&line);
+        b.end_line();
+        let whole = distances(&b.finish());
+
+        // The pieces meet at vertices 7 and 15, measured by the tile to the
+        // right, at the same level.
+        let right = MeshBuilder::new(TileFrame { center: [200.0, 0.0], half_span: 100.0 }, Detail { tile_px: 200.0, grid_px: 1.0, guard_px: 10.0 });
+        let mut b = builder();
+        let mut start = 0.0;
+        for piece in [&line[..=7], &line[7..=15], &line[15..]] {
+            b.set_line_start(start);
+            b.begin_line();
+            b.points(piece);
+            b.end_line();
+            start += right.line_length(piece);
+        }
+        let expected: Vec<f64> = whole[..=7].iter().chain(&whole[7..=15]).chain(&whole[15..]).copied().collect();
+        assert_eq!(distances(&b.finish()), expected);
+        let source: f64 = line.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+        assert!((start - whole[39]).abs() < 1e-3 && (source - start).abs() > 5.0, "{start} {source}");
     }
 
     #[test]

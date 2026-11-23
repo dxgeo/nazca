@@ -23,7 +23,11 @@
 //!   with a [`crate::Dash`] keeps only what lies within half the width of an
 //!   on length of its pattern, measured in pixels from the segment's
 //!   distance along its line, so dash ends are round too and an on length of
-//!   0 is a dot. A segment whose partner draws the same stretch of a shared
+//!   0 is a dot. A run of segments chained end to start shares a base
+//!   distance and each carries its offset from it, so a run far along its
+//!   line keeps one phase: `f32` loses the base's pixels by up to a few
+//!   there, but alike for every segment, a jump at the run's ends rather
+//!   than a jitter at each vertex. A segment whose partner draws the same stretch of a shared
 //!   border ([`Mesh::partners`]) collapses wherever the partner is drawn: its
 //!   class has a line, and in a state draw it holds the state.
 //! - *Points* are an instanced quad each, drawn by one program: a round dot
@@ -79,9 +83,9 @@ const IDENTITY: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1
 /// Bytes a vertex: X, Y and the style class as `f32`, the feature id as `u32`.
 const VERTEX_BYTES: usize = 16;
 /// Bytes a segment instance: both ends' X and Y, the class, the feature id,
-/// the distance along its line at its start, and its partner's class (-1
-/// for none) and feature id.
-const SEGMENT_BYTES: usize = 36;
+/// the distance along its line at its start as its run's base and its
+/// offset from it, and its partner's class (-1 for none) and feature id.
+const SEGMENT_BYTES: usize = 40;
 /// Features a row of a state texture; `STATE_VS` wraps on the same number.
 /// OpenGL 3.3 guarantees textures this wide.
 const STATE_ROW: usize = 1024;
@@ -151,9 +155,10 @@ layout(location = 0) in vec2 a_p0;
 layout(location = 1) in vec2 a_p1;
 layout(location = 2) in float a_class;
 layout(location = 3) in uint a_id;
-layout(location = 4) in float a_dist;
-layout(location = 5) in float a_partner_class;
-layout(location = 6) in uint a_partner_id;
+layout(location = 4) in float a_base;
+layout(location = 5) in float a_offset;
+layout(location = 6) in float a_partner_class;
+layout(location = 7) in uint a_partner_id;
 uniform mat4 u_matrix;
 uniform mat4 u_post;
 uniform vec2 u_viewport;
@@ -201,14 +206,16 @@ void main() {
     v_color = texelFetch(u_palette, ivec2(cls, 1), 0);
     v_half = width > 0.0 ? max(width * 0.5, u_min_half) : 0.0;
     // The dash pattern, an odd count of lengths repeated twice, and where
-    // in it the segment starts.
+    // in it the segment starts: the run's base reduced by the pattern
+    // before the offset is added, so the base's rounding, the same for the
+    // whole run, is all a segment far along its line loses.
     v_dash0 = texelFetch(u_palette, ivec2(cls, 4), 0);
     v_dash1 = texelFetch(u_palette, ivec2(cls, 5), 0);
     vec4 phase_count = texelFetch(u_palette, ivec2(cls, 6), 0);
     v_dash_count = phase_count.w;
     float sum = dot(v_dash0, vec4(1.0)) + dot(v_dash1, vec4(1.0));
     v_period = mod(phase_count.w, 2.0) > 0.5 ? 2.0 * sum : sum;
-    v_start = v_period > 0.0 ? mod(a_dist * u_unit_px + phase_count.z, v_period) : 0.0;
+    v_start = v_period > 0.0 ? mod(mod(a_base * u_unit_px, v_period) + a_offset * u_unit_px + phase_count.z, v_period) : 0.0;
     vec2 a = to_px(a_p0);
     vec2 b = to_px(a_p1);
     vec2 d = b - a;
@@ -848,7 +855,7 @@ impl Renderer {
         let line_count = mesh.outlines.len() / 2;
         let point_count = mesh.points.len();
         let mut segments = Vec::with_capacity((line_count + point_count) * SEGMENT_BYTES);
-        let mut segment = |a: u32, b: u32, partner: Option<usize>| {
+        let mut segment = |a: u32, b: u32, base: f32, partner: Option<usize>| {
             let v = &mesh.vertices;
             let (i, j) = (a as usize, b as usize);
             segments.extend_from_slice(&f32_bytes(&[v[i * 3], v[i * 3 + 1], v[j * 3], v[j * 3 + 1], v[i * 3 + 2]]));
@@ -857,14 +864,25 @@ impl Renderer {
                 let pa = mesh.outlines[p * 2] as usize;
                 (v[pa * 3 + 2], mesh.ids[pa])
             });
-            segments.extend_from_slice(&f32_bytes(&[mesh.distance(a), class]));
+            let offset = (mesh.distance(a) - base as f64) as f32;
+            segments.extend_from_slice(&f32_bytes(&[base, offset, class]));
             segments.extend_from_slice(&id.to_ne_bytes());
         };
+        // A run goes on while each segment starts where the last ended, its
+        // distance rising: a ring's closing edge ends where its distance
+        // starts again. The base is the run's first distance as an `f32`,
+        // the offsets taking up its rounding.
+        let (mut base, mut last) = (0.0f32, None);
         for (k, s) in mesh.outlines.chunks_exact(2).enumerate() {
-            segment(s[0], s[1], mesh.partner(k));
+            let d = mesh.distance(s[0]);
+            if !matches!(last, Some((end, before)) if end == s[0] && d >= before) {
+                base = d as f32;
+            }
+            segment(s[0], s[1], base, mesh.partner(k));
+            last = Some((s[1], d));
         }
         for &p in &mesh.points {
-            segment(p, p, None);
+            segment(p, p, 0.0, None);
         }
         let indices: Vec<u8> = mesh.fills.iter().flat_map(|i| i.to_ne_bytes()).collect();
         // SAFETY: every object is created and bound here; `buffer_data`
@@ -896,12 +914,12 @@ impl Renderer {
                 gl.bind_vertex_array(Some(vao));
                 let base = (first * SEGMENT_BYTES) as i32;
                 let stride = SEGMENT_BYTES as i32;
-                for (loc, size, offset) in [(0, 2, 0), (1, 2, 8), (2, 1, 16), (4, 1, 24), (5, 1, 28)] {
+                for (loc, size, offset) in [(0, 2, 0), (1, 2, 8), (2, 1, 16), (4, 1, 24), (5, 1, 28), (6, 1, 32)] {
                     gl.enable_vertex_attrib_array(loc);
                     gl.vertex_attrib_pointer_f32(loc, size, glow::FLOAT, false, stride, base + offset);
                     gl.vertex_attrib_divisor(loc, 1);
                 }
-                for (loc, offset) in [(3, 20), (6, 32)] {
+                for (loc, offset) in [(3, 20), (7, 36)] {
                     gl.enable_vertex_attrib_array(loc);
                     gl.vertex_attrib_pointer_i32(loc, 1, glow::UNSIGNED_INT, stride, base + offset);
                     gl.vertex_attrib_divisor(loc, 1);
