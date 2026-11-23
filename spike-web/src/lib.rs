@@ -4,9 +4,10 @@
 //! right-drag to rotate about the canvas's centre, click to pick a county
 //! and toggle its selection, press H to toggle a hover state on the county
 //! picked last, press F to show every other county, press M to cycle the
-//! counties' markers, press S to log the view as an SVG to the console,
-//! press C to run the state check, press K to run the marker check, and
-//! press R to cycle the raster overlay.
+//! counties' markers, press D to cycle their outlines, press S to log the
+//! view as an SVG to the console, press C to run the state check, press K
+//! to run the marker check, press X to run the dash check (its report
+//! logged to the console too), and press R to cycle the raster overlay.
 //!
 //!   wasm-pack build --target web --release
 //!   python3 -m http.server   # then open http://localhost:8000/
@@ -186,7 +187,21 @@ pub fn start() -> Result<(), JsValue> {
                 let next = st.map.markers().next();
                 st.map.set_markers(&st.gl, &st.renderer, next);
             }
+            "d" => {
+                let next = st.map.outlines().next();
+                st.map.set_outlines(&st.gl, &st.renderer, next);
+            }
             "s" => web_sys::console::log_1(&st.map.svg(&st.camera).into()),
+            "x" => {
+                let performance = web_sys::window().and_then(|w| w.performance());
+                let clock = move || performance.as_ref().map_or(0.0, |p| p.now());
+                let report = match tiles::check_dashes(&st.gl, &st.renderer, st.map.counties(), st.camera.size_px, &clock) {
+                    Ok(report) => report,
+                    Err(e) => format!("dash check failed: {e}"),
+                };
+                web_sys::console::log_1(&report.clone().into());
+                st.picked = format!(" · {}", report.lines().next().unwrap_or_default());
+            }
             "k" => {
                 st.picked = match tiles::check_markers(&mut st.map, &st.gl, &st.renderer, &st.camera) {
                     Ok(report) => format!(" · {report}"),

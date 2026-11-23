@@ -467,8 +467,10 @@ Not a backend but also feature-gated: =mvt= (decoder, no dependency;
   stencil. The context needs a stencil buffer (WebGL leaves it out unless
   asked). Verified with translucent fills over 16 tiles: no tile edge shows.
 - *Known limits*: a translucent line blends twice where segments' round ends
-  overlap (darker dots at vertices), and a border two polygons share is
-  outlined by both. Neither shows with opaque lines.
+  overlap (darker dots at vertices), which doesn't show with opaque lines.
+  /Changed 2026-11-23, with dashes (plans/custom-symbols.org § OPEN
+  QUESTIONS 9):/ a border two polygons share was outlined by both; it is
+  now drawn once, by the last feature fed that outlines it.
 - /Changed 2026-10-30, with the SVG backend: no separate draw-command
   buffer./ The prepared =Mesh= is already flat =f32= / =u32= buffers, and it
   is what both backends replay. The GPU takes its triangles and outline

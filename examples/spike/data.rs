@@ -7,7 +7,7 @@
 use nazca::grid::{Rect, TileFrame};
 use nazca::raster::{Band, Raster, RasterMesh};
 use nazca::symbol::Kind;
-use nazca::{Align, Colormap, Detail, Marker, Mesh, MeshBuilder, Palette, Sink, Style, Symbol, SymbolId, Symbols, TileGrid, TileId, wkb};
+use nazca::{Align, Colormap, Dash, Detail, Marker, Mesh, MeshBuilder, Palette, Sink, Style, Symbol, SymbolId, Symbols, TileGrid, TileId, wkb};
 
 /// Added to a county's index for its marker's feature id, so a pick tells a
 /// marker from the county under it.
@@ -109,6 +109,35 @@ impl Counties {
     /// The feature id of the county called `name`.
     pub fn find(&self, name: &str) -> Option<u32> {
         self.counties.iter().position(|c| c.name == name).map(|i| i as u32)
+    }
+
+    /// The longest ring of the county called `name`, in Web Mercator
+    /// metres, closed.
+    pub fn longest_ring(&self, name: &str) -> Option<Vec<[f64; 2]>> {
+        /// Keeps the longest ring fed to it, by point count.
+        #[derive(Default)]
+        struct Longest {
+            ring: Vec<[f64; 2]>,
+            best: Vec<[f64; 2]>,
+        }
+        impl Sink for Longest {
+            fn point(&mut self, _: [f64; 2]) {}
+            fn points(&mut self, xy: &[[f64; 2]]) {
+                self.ring.extend_from_slice(xy);
+            }
+            fn begin_ring(&mut self) {
+                self.ring.clear();
+            }
+            fn end_ring(&mut self) {
+                if self.ring.len() > self.best.len() {
+                    self.best = std::mem::take(&mut self.ring);
+                }
+            }
+        }
+        let c = self.counties.iter().find(|c| c.name == name)?;
+        let mut longest = Longest::default();
+        wkb::read(&c.wkb, &mut ToWebMercator(&mut longest)).ok()?;
+        Some(longest.best)
     }
 
     /// The centre of county `i`'s bounds, where its marker stands.
@@ -253,6 +282,49 @@ fn marker(symbol: SymbolId, size: f32, align: Align, rotation: f32, fill: [f32; 
     style
 }
 
+/// How the counties are outlined.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Outlines {
+    Solid,
+    /// Dashes 6 pixels on, 4 off.
+    Dashed,
+    /// Dots: on lengths of 0, round, 5 pixels apart.
+    Dotted,
+    /// A wide translucent line, which shows a border drawn twice darker.
+    Translucent,
+}
+
+impl Outlines {
+    pub fn next(self) -> Outlines {
+        match self {
+            Outlines::Solid => Outlines::Dashed,
+            Outlines::Dashed => Outlines::Dotted,
+            Outlines::Dotted => Outlines::Translucent,
+            Outlines::Translucent => Outlines::Solid,
+        }
+    }
+
+    /// The counties' line colour, width and dash.
+    fn look(self) -> ([f32; 4], f32, Option<Dash>) {
+        const INK: [f32; 4] = [0.25, 0.27, 0.30, 1.0];
+        match self {
+            Outlines::Solid => (INK, 1.25, None),
+            Outlines::Dashed => (INK, 1.5, Dash::new(&[6.0, 4.0], 0.0)),
+            Outlines::Dotted => (INK, 2.5, Dash::new(&[0.0, 5.0], 0.0)),
+            Outlines::Translucent => ([0.1, 0.2, 0.7, 0.5], 4.0, None),
+        }
+    }
+
+    /// The dash a chosen county's outline takes: one when the counties
+    /// have one.
+    pub fn highlight_dash(self) -> Option<Dash> {
+        match self {
+            Outlines::Dashed | Outlines::Dotted => Dash::new(&[10.0, 6.0], 0.0),
+            Outlines::Solid | Outlines::Translucent => None,
+        }
+    }
+}
+
 /// The pin's sizes. Checked against half of the default 32-pixel guard band
 /// ([`nazca::Palette::check_reach`]): against the map the pin reaches its
 /// tip's depth, 0.97 of its size, so 16 fits; upright on the screen it can
@@ -262,7 +334,7 @@ pub const PIN_ON_MAP: f32 = 16.0;
 pub const PIN_ON_SCREEN: f32 = 15.0;
 
 /// Six muted fills for neighbouring counties, outlined, and their markers.
-pub fn palette(markers: Markers, icons: &Icons) -> Palette {
+pub fn palette(markers: Markers, outlines: Outlines, icons: &Icons) -> Palette {
     const FILLS: [[f32; 4]; 6] = [
         [0.80, 0.86, 0.75, 1.0],
         [0.93, 0.85, 0.70, 1.0],
@@ -272,8 +344,11 @@ pub fn palette(markers: Markers, icons: &Icons) -> Palette {
         [0.95, 0.92, 0.76, 1.0],
     ];
     let mut p = Palette::new();
+    let (line, width, dash) = outlines.look();
     for (i, fill) in FILLS.into_iter().enumerate() {
-        p.set(1 + i as u8, outlined(fill, [0.25, 0.27, 0.30, 1.0], 1.25));
+        let mut style = outlined(fill, line, width);
+        style.dash = dash;
+        p.set(1 + i as u8, style);
     }
     const WHITE: [f32; 4] = [1.0; 4];
     let looks = match markers {
@@ -314,10 +389,12 @@ fn outlined(fill: [f32; 4], line: [f32; 4], line_width: f32) -> Style {
 }
 
 /// The look of a chosen county, in every class the counties use.
-pub fn highlight(fill: [f32; 4], line: [f32; 4], line_width: f32) -> Palette {
+pub fn highlight(fill: [f32; 4], line: [f32; 4], line_width: f32, dash: Option<Dash>) -> Palette {
     let mut p = Palette::new();
     for class in 1..=6 {
-        p.set(class, outlined(fill, line, line_width));
+        let mut style = outlined(fill, line, line_width);
+        style.dash = dash;
+        p.set(class, style);
     }
     p
 }

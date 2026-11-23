@@ -19,7 +19,13 @@
 //!   shader: each segment is one instanced quad around it, and the fragment
 //!   shader keeps what lies within half the width of the segment, with a
 //!   one-pixel antialiased edge. That draws round caps and round joins with
-//!   no neighbour information, and widths stay right at every zoom.
+//!   no neighbour information, and widths stay right at every zoom. A class
+//!   with a [`crate::Dash`] keeps only what lies within half the width of an
+//!   on length of its pattern, measured in pixels from the segment's
+//!   distance along its line, so dash ends are round too and an on length of
+//!   0 is a dot. A segment whose partner draws the same stretch of a shared
+//!   border ([`Mesh::partners`]) collapses wherever the partner is drawn: its
+//!   class has a line, and in a state draw it holds the state.
 //! - *Points* are an instanced quad each, drawn by one program: a round dot
 //!   in the fill colour, or, where the class has a [`crate::Marker`], its
 //!   symbol sized by the point size, placed by its anchor and turned against
@@ -72,8 +78,10 @@ const IDENTITY: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1
 
 /// Bytes a vertex: X, Y and the style class as `f32`, the feature id as `u32`.
 const VERTEX_BYTES: usize = 16;
-/// Bytes a segment instance: both ends' X and Y, the class, the feature id.
-const SEGMENT_BYTES: usize = 24;
+/// Bytes a segment instance: both ends' X and Y, the class, the feature id,
+/// the distance along its line at its start, and its partner's class (-1
+/// for none) and feature id.
+const SEGMENT_BYTES: usize = 36;
 /// Features a row of a state texture; `STATE_VS` wraps on the same number.
 /// OpenGL 3.3 guarantees textures this wide.
 const STATE_ROW: usize = 1024;
@@ -143,20 +151,32 @@ layout(location = 0) in vec2 a_p0;
 layout(location = 1) in vec2 a_p1;
 layout(location = 2) in float a_class;
 layout(location = 3) in uint a_id;
+layout(location = 4) in float a_dist;
+layout(location = 5) in float a_partner_class;
+layout(location = 6) in uint a_partner_id;
 uniform mat4 u_matrix;
 uniform mat4 u_post;
 uniform vec2 u_viewport;
 uniform highp sampler2D u_palette;
 uniform float u_min_half;
+uniform float u_unit_px;
 flat out vec2 v_a;
 flat out vec2 v_b;
 flat out float v_half;
 flat out vec4 v_color;
 flat out uint v_id;
+flat out vec4 v_dash0;
+flat out vec4 v_dash1;
+flat out float v_dash_count;
+flat out float v_period;
+flat out float v_start;
 out vec2 v_px;
 vec2 to_px(vec2 p) {
     vec4 c = u_matrix * vec4(p, 0.0, 1.0);
     return (c.xy / c.w * 0.5 + 0.5) * u_viewport;
+}
+bool draws_line(int cls) {
+    return texelFetch(u_palette, ivec2(cls, 2), 0).x > 0.0 && texelFetch(u_palette, ivec2(cls, 1), 0).a > 0.0;
 }
 void main() {
 #ifdef STATE
@@ -165,10 +185,30 @@ void main() {
         return;
     }
 #endif
+    // The later copy of a shared border draws it, where it is drawn at all.
+    if (a_partner_class >= 0.0) {
+        bool partner = draws_line(int(a_partner_class + 0.5));
+#ifdef STATE
+        partner = partner && has_state(a_partner_id);
+#endif
+        if (partner) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
+    }
     int cls = int(a_class + 0.5);
     float width = texelFetch(u_palette, ivec2(cls, 2), 0).x;
     v_color = texelFetch(u_palette, ivec2(cls, 1), 0);
     v_half = width > 0.0 ? max(width * 0.5, u_min_half) : 0.0;
+    // The dash pattern, an odd count of lengths repeated twice, and where
+    // in it the segment starts.
+    v_dash0 = texelFetch(u_palette, ivec2(cls, 4), 0);
+    v_dash1 = texelFetch(u_palette, ivec2(cls, 5), 0);
+    vec4 phase_count = texelFetch(u_palette, ivec2(cls, 6), 0);
+    v_dash_count = phase_count.w;
+    float sum = dot(v_dash0, vec4(1.0)) + dot(v_dash1, vec4(1.0));
+    v_period = mod(phase_count.w, 2.0) > 0.5 ? 2.0 * sum : sum;
+    v_start = v_period > 0.0 ? mod(a_dist * u_unit_px + phase_count.z, v_period) : 0.0;
     vec2 a = to_px(a_p0);
     vec2 b = to_px(a_p1);
     vec2 d = b - a;
@@ -194,6 +234,11 @@ flat in vec2 v_b;
 flat in float v_half;
 flat in vec4 v_color;
 flat in uint v_id;
+flat in vec4 v_dash0;
+flat in vec4 v_dash1;
+flat in float v_dash_count;
+flat in float v_period;
+flat in float v_start;
 in vec2 v_px;
 float distance_to_segment() {
     vec2 ab = v_b - v_a;
@@ -201,6 +246,34 @@ float distance_to_segment() {
     float l = dot(ab, ab);
     float t = l > 0.0 ? clamp(dot(ap, ab) / l, 0.0, 1.0) : 0.0;
     return length(ap - ab * t);
+}
+// How far the fragment lies from the nearest on length of the dash
+// pattern, laid along the segment's line from where the segment starts in
+// it: 0 along it inside a dash, so a dash is a capsule and its ends round.
+float distance_to_dash() {
+    vec2 ab = v_b - v_a;
+    float len = length(ab);
+    vec2 dir = len > 0.0 ? ab / len : vec2(1.0, 0.0);
+    vec2 ap = v_px - v_a;
+    float u = mod(v_start + dot(ap, dir), v_period);
+    float across = abs(dot(ap, vec2(-dir.y, dir.x)));
+    float lengths[8] = float[8](v_dash0.x, v_dash0.y, v_dash0.z, v_dash0.w, v_dash1.x, v_dash1.y, v_dash1.z, v_dash1.w);
+    int n = int(v_dash_count + 0.5);
+    int total = n % 2 == 1 ? 2 * n : n;
+    float at = 0.0;
+    float gap = 1e30;
+    for (int i = 0; i < 16; i++) {
+        if (i >= total) break;
+        float l = lengths[i % n];
+        if (i % 2 == 0) {
+            for (int k = -1; k <= 1; k++) {
+                float lo = at + float(k) * v_period;
+                gap = min(gap, max(max(lo - u, u - lo - l), 0.0));
+            }
+        }
+        at += l;
+    }
+    return length(vec2(gap, across));
 }
 #ifdef PICK
 uniform uint u_layer;
@@ -212,7 +285,9 @@ void main() {
 #else
 out vec4 o_color;
 void main() {
-    float cover = clamp(v_half + 0.5 - distance_to_segment(), 0.0, 1.0);
+    float d = distance_to_segment();
+    if (v_period > 0.0) d = max(d, distance_to_dash());
+    float cover = clamp(v_half + 0.5 - d, 0.0, 1.0);
     if (cover <= 0.0) discard;
     o_color = vec4(v_color.rgb, v_color.a * cover);
 }
@@ -720,7 +795,7 @@ impl Renderer {
         let state = format!("{header}#define STATE\n");
         let pick_state = format!("{header}#define PICK\n#define STATE\n");
         let fill_u = ["u_matrix", "u_post", "u_palette", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
-        let line_u = ["u_matrix", "u_post", "u_viewport", "u_palette", "u_min_half", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
+        let line_u = ["u_matrix", "u_post", "u_viewport", "u_palette", "u_min_half", "u_unit_px", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
         let marker_u = ["u_matrix", "u_post", "u_viewport", "u_palette", "u_table", "u_atlas", "u_min_half", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
         let raster_u = ["u_matrix", "u_post", "u_band", "u_ramp", "u_kind", "u_domain", "u_opacity", "u_has_nodata", "u_nodata"];
         let renderer = Renderer {
@@ -773,17 +848,23 @@ impl Renderer {
         let line_count = mesh.outlines.len() / 2;
         let point_count = mesh.points.len();
         let mut segments = Vec::with_capacity((line_count + point_count) * SEGMENT_BYTES);
-        let mut segment = |a: u32, b: u32| {
-            let (a, b) = (a as usize, b as usize);
+        let mut segment = |a: u32, b: u32, partner: Option<usize>| {
             let v = &mesh.vertices;
-            segments.extend_from_slice(&f32_bytes(&[v[a * 3], v[a * 3 + 1], v[b * 3], v[b * 3 + 1], v[a * 3 + 2]]));
-            segments.extend_from_slice(&mesh.ids[a].to_ne_bytes());
+            let (i, j) = (a as usize, b as usize);
+            segments.extend_from_slice(&f32_bytes(&[v[i * 3], v[i * 3 + 1], v[j * 3], v[j * 3 + 1], v[i * 3 + 2]]));
+            segments.extend_from_slice(&mesh.ids[i].to_ne_bytes());
+            let (class, id) = partner.map_or((-1.0, 0), |p| {
+                let pa = mesh.outlines[p * 2] as usize;
+                (v[pa * 3 + 2], mesh.ids[pa])
+            });
+            segments.extend_from_slice(&f32_bytes(&[mesh.distance(a), class]));
+            segments.extend_from_slice(&id.to_ne_bytes());
         };
-        for s in mesh.outlines.chunks_exact(2) {
-            segment(s[0], s[1]);
+        for (k, s) in mesh.outlines.chunks_exact(2).enumerate() {
+            segment(s[0], s[1], mesh.partner(k));
         }
         for &p in &mesh.points {
-            segment(p, p);
+            segment(p, p, None);
         }
         let indices: Vec<u8> = mesh.fills.iter().flat_map(|i| i.to_ne_bytes()).collect();
         // SAFETY: every object is created and bound here; `buffer_data`
@@ -815,14 +896,16 @@ impl Renderer {
                 gl.bind_vertex_array(Some(vao));
                 let base = (first * SEGMENT_BYTES) as i32;
                 let stride = SEGMENT_BYTES as i32;
-                for (loc, size, offset) in [(0, 2, 0), (1, 2, 8), (2, 1, 16)] {
+                for (loc, size, offset) in [(0, 2, 0), (1, 2, 8), (2, 1, 16), (4, 1, 24), (5, 1, 28)] {
                     gl.enable_vertex_attrib_array(loc);
                     gl.vertex_attrib_pointer_f32(loc, size, glow::FLOAT, false, stride, base + offset);
                     gl.vertex_attrib_divisor(loc, 1);
                 }
-                gl.enable_vertex_attrib_array(3);
-                gl.vertex_attrib_pointer_i32(3, 1, glow::UNSIGNED_INT, stride, base + 20);
-                gl.vertex_attrib_divisor(3, 1);
+                for (loc, offset) in [(3, 20), (6, 32)] {
+                    gl.enable_vertex_attrib_array(loc);
+                    gl.vertex_attrib_pointer_i32(loc, 1, glow::UNSIGNED_INT, stride, base + offset);
+                    gl.vertex_attrib_divisor(loc, 1);
+                }
                 Ok(vao)
             };
             let line_vao = segment_vao(0)?;
@@ -1129,6 +1212,7 @@ impl Renderer {
                 }
             };
             gl.uniform_1_f32(line.u("u_min_half"), min_half);
+            gl.uniform_1_f32(line.u("u_unit_px"), (mesh.frame.half_span / camera.units_per_px) as f32);
             if mesh.line_count > 0 {
                 gl.bind_vertex_array(Some(mesh.line_vao));
                 gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, mesh.line_count);

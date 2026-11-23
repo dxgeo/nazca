@@ -5,7 +5,8 @@
 //! the cursor, right-drag to rotate about the window's centre, click to pick
 //! a county and toggle its selection, press H to toggle a hover state on the
 //! county picked last, press F to show every other county, press M to cycle
-//! the markers, and press R to cycle the raster overlay.
+//! the markers, press D to cycle the outlines (solid, dashed, dotted,
+//! translucent), and press R to cycle the raster overlay.
 //!
 //!   cargo run -p nazca --features gl --example spike
 //!   cargo run -p nazca --features gl --example spike -- --screenshot out.png
@@ -29,11 +30,15 @@
 //! image, reports and exits. `--centre NAME` centres the view on that
 //! county's marker, and `--level Z` sets the zoom to MapLibre's zoom `Z`
 //! (the grid's level, fractional), as a tile-edge check aims a view.
+//! `--outlines` (`dashed`, `dotted` or `translucent`) opens with those
+//! outlines, as D cycles them. `--check-dashes` checks shared borders and
+//! dashes by reading the framebuffer, measures line starts' seams, `f32`
+//! distances' jitter and the cost of matching borders, reports and exits.
 
 mod data;
 mod tiles;
 
-use data::{Markers, Overlay};
+use data::{Markers, Outlines, Overlay};
 use glutin::config::{ConfigTemplateBuilder, GlConfig};
 use glutin::context::{ContextApi, ContextAttributesBuilder, GlProfile, NotCurrentGlContext, PossiblyCurrentContext, Version};
 use glutin::display::{GetGlDisplay, GlDisplay};
@@ -123,6 +128,8 @@ struct Options {
     check_markers: bool,
     centre: Option<String>,
     level: Option<f64>,
+    outlines: Outlines,
+    check_dashes: bool,
 }
 
 struct App {
@@ -152,6 +159,21 @@ impl App {
         if self.options.filter {
             self.options.filter = false;
             g.map.set_filter(&g.gl, &g.renderer, true);
+        }
+        if self.options.check_dashes {
+            let start = std::time::Instant::now();
+            let clock = move || start.elapsed().as_secs_f64() * 1e3;
+            match tiles::check_dashes(&g.gl, &g.renderer, g.map.counties(), camera.size_px, &clock) {
+                Ok(report) => println!("{report}"),
+                Err(e) => {
+                    eprintln!("dash check failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
+        if self.options.outlines != Outlines::Solid {
+            g.map.set_outlines(&g.gl, &g.renderer, std::mem::replace(&mut self.options.outlines, Outlines::Solid));
         }
         if self.options.markers != Markers::None {
             g.map.set_markers(&g.gl, &g.renderer, std::mem::replace(&mut self.options.markers, Markers::None));
@@ -334,6 +356,11 @@ impl ApplicationHandler for App {
                     g.map.set_markers(&g.gl, &g.renderer, next);
                     println!("markers: {next:?}");
                 }
+                Key::Character(c) if c.eq_ignore_ascii_case("d") => {
+                    let next = g.map.outlines().next();
+                    g.map.set_outlines(&g.gl, &g.renderer, next);
+                    println!("outlines: {next:?}");
+                }
                 Key::Character(c) if c.eq_ignore_ascii_case("f") => {
                     let on = !g.map.filtered();
                     g.map.set_filter(&g.gl, &g.renderer, on);
@@ -356,7 +383,7 @@ impl ApplicationHandler for App {
 
 fn main() {
     let usage = || -> ! {
-        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state] [--own-gl] [--markers colour|mask] [--check-markers] [--centre NAME] [--level Z]");
+        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state] [--own-gl] [--markers colour|mask] [--check-markers] [--centre NAME] [--level Z] [--outlines dashed|dotted|translucent] [--check-dashes]");
         std::process::exit(2);
     };
     let mut options = Options {
@@ -374,6 +401,8 @@ fn main() {
         check_markers: false,
         centre: None,
         level: None,
+        outlines: Outlines::Solid,
+        check_dashes: false,
     };
     let mut args = std::env::args().skip(1);
     let point = |value: &str| -> [f64; 2] {
@@ -398,6 +427,10 @@ fn main() {
             options.check_markers = true;
             continue;
         }
+        if flag == "--check-dashes" {
+            options.check_dashes = true;
+            continue;
+        }
         let value = args.next().unwrap_or_else(|| usage());
         match flag.as_str() {
             "--screenshot" => options.screenshot = Some(value),
@@ -415,6 +448,14 @@ fn main() {
                 options.markers = match value.as_str() {
                     "colour" => Markers::Colour,
                     "mask" => Markers::Mask,
+                    _ => usage(),
+                }
+            }
+            "--outlines" => {
+                options.outlines = match value.as_str() {
+                    "dashed" => Outlines::Dashed,
+                    "dotted" => Outlines::Dotted,
+                    "translucent" => Outlines::Translucent,
                     _ => usage(),
                 }
             }

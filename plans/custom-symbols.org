@@ -12,9 +12,11 @@ padding and mipmaps, its premultiplied pixels and its limits decided for
 it. Step 2 is built (2026-11-21): markers draw, pick and write SVG from
 pixels, natively and in Chrome's WebGL2, and the spike's views without
 markers are byte-identical to step 1's. Their SVG markup moved to step 5
-(§ OPEN QUESTIONS 8, decided 2026-11-22). Step 3 is next, reviewed
-2026-11-22: shared borders drawn once (§ OPEN QUESTIONS 9), and § Dashes,
-§ SVG output and § CHECKS corrected for it. Step 7, vector
+(§ OPEN QUESTIONS 8, decided 2026-11-22). Step 3, reviewed 2026-11-22
+(shared borders drawn once, § OPEN QUESTIONS 9), is built (2026-11-23)
+and checked natively and in Chrome's WebGL2; two measurements wait on a
+decision (§ CHECKS: a far line start, and line starts on detailed
+lines). Step 7, vector
 symbols, waits on
 § OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
 symbol at a time. Markers, dashes and pattern fills are three parts that
@@ -298,9 +300,10 @@ Ruled out:
   dashes run on across tile edges. Without it each piece starts at 0. The
   seam is only as close as the embedder's start is to nazca's own measure,
   which runs along the line as snapped and decimated at the tile's level:
-  on a wiggly line at a low zoom, snapping drops the wiggles finer than its
-  grid, so the measured length falls short of the source's and the seam
-  jumps by the difference. Measuring the source's own geometry instead
+  snapping drops the wiggles finer than its grid and moves every vertex,
+  so on a line of many short segments the measured length parts from the
+  source's at every zoom, not only low ones, and the seam jumps by the
+  difference (§ CHECKS, measured 2026-11-23: 12 to 181 pixels). Measuring the source's own geometry instead
   would stretch each dash by the line's simplification and part the screen
   from SVG output, whose =stroke-dasharray= dashes the path as drawn. A
   feature handed whole to every tile needs no start: each tile at a level
@@ -636,7 +639,10 @@ Ruled out:
    literal (=examples/spike/tiles.rs=) builds through a constructor or
    =MeshBuilder=. Docs: =prepare.rs=, =gl.rs= and =svg.rs= module docs,
    the known limits in plans/rendering.org § BACKENDS (a shared border no
-   longer outlined twice).
+   longer outlined twice). Built 2026-11-23, with the dash check
+   (=--check-dashes=, X in the browser) and the counties' outlines dashed,
+   dotted and translucent (=--outlines=, D); checked natively and in
+   Chrome's WebGL2.
 4. *Pattern fills*: the anchor uniform, =FILL_FS='s pattern sample,
    =<pattern>= in SVG.
 5. *=Symbol::from_svg=* behind the =symbols= feature (§ OPEN QUESTIONS 1),
@@ -673,14 +679,36 @@ Ruled out:
     of its pixels, shows no rim of its neighbour's colour, and a white
     colour marker on transparent pixels stored black shows no grey rim at
     that size or at full size between pixels.
-  - /Dashes/: county outlines dashed and dotted, each shared border one
+  - /Dashes/ (run 2026-11-23, natively and in Chrome's WebGL2, with the
+    same results):
+    county outlines dashed and dotted, each shared border one
     pattern, not two out of phase, and a hovered county's dashed outline
     whole through a state. A translucent undashed outline no darker on a
     shared border than elsewhere; a T-junction on a straight border
     matched. The spike has no lines, so a synthetic one, cut into pieces
     with starts: the pattern runs on across tile edges, the jump at each
     seam measured, not assumed 0, at a low zoom on a wiggly line; without
-    starts it restarts. It doesn't crawl as the map pans.
+    starts it restarts. It doesn't crawl as the map pans (not yet run). Run:
+    three rectangles meeting at a T-junction, read back: a translucent
+    outline the same blue (128) on shared borders and borders of one; a
+    dash pattern covering 0.60 of each; each rectangle whole through a
+    state, and the wide one's border drawn when the narrow ones' class
+    has no line; a dashed line in two tiles' pieces matching it whole at
+    every pixel with its start, and differing at 105 of 340 without. Each
+    of these fails when the shader is broken on purpose: no suppression,
+    suppression blind to the state or to the partner's line, no dash test,
+    dashes blind to the distance or to its scale. The counties' screenshots
+    dashed, dotted and translucent, and a hovered county's dashed outline,
+    whole; its SVG the same in WebKit. The darker dots at a translucent
+    line's vertices remain (plans/rendering.org § BACKENDS). Line starts
+    measured on the source's geometry: Barnstable's coast in the fixture,
+    48 vertices, misses by under 1 pixel at z6 to z16; a 20 km line
+    wiggling 5 m every 10 m by 12 to 181 pixels at z8 to z18, both ways,
+    since snapping a regular wiggle lengthens it as much as dropping one
+    shortens it. So a start the embedder measures itself joins only on
+    lines of few, long segments; one measured as nazca measures, on the
+    level's own grid, would join exactly, and needs a function nazca
+    doesn't have.
   - /A far line start/: an =f32= distance loses the phase by about the
     distance in pixels times 6 x 10^-8 at each vertex: 0.2 pixels for a
     piece 1,000 km along its line at z18, 4 pixels for 5,000 km at z20. A
@@ -689,7 +717,11 @@ Ruled out:
     shader's product of the distance and the scale loses as much again.
     The cure is a base a run of segments shares and an offset from it
     (=SEGMENT_BYTES= 4 more): the run then carries one error, a jump at its
-    seam, with no jitter between its vertices.
+    seam, with no jitter between its vertices. Measured 2026-11-23, as the
+    shader multiplies in =f32=, at z20: 1,000 km along, the phase off by up
+    to 0.50 pixels and 0.84 between neighbouring vertices; 5,000 km, 2.00
+    and 3.16. Not cured yet: whether 0.84 at z20 is seen, and the cure worth
+    its 4 bytes, is the user's call.
   - /Patterns/: a hatch over a flat fill (two palettes), anchored to the map
     while panning, with no seam at tile edges or at the repeat, at z2 and
     z14.
@@ -739,3 +771,6 @@ Ruled out:
   mesh bytes and prepare time of a large line layer with and without
   distances (§ OPEN QUESTIONS 4); the counties' prepare time and segment
   bytes with and without shared borders matched (§ OPEN QUESTIONS 9).
+  Measured 2026-11-23, release, the counties' tiles at z10: feeding 0.3
+  ms, matching (=MeshBuilder::finish=) 0.1 ms; 716 outline segments, 194
+  paired; the partner's 8 bytes a segment are 5 KB of the segments' 25 KB.

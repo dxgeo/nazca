@@ -10,7 +10,16 @@
 //! - *Lines* are the mesh's outline segments, chained back into polylines.
 //!   These are exactly the segments the GPU draws, so edges that clipping
 //!   made are not stroked here either, and lines draw over every fill of
-//!   their layer, as on screen.
+//!   their layer, as on screen. Each is cut to the tile's own area, half
+//!   open as points are, so a line in a neighbour's guard band too is
+//!   written once; a dash cut at a tile edge is two capped halves whose
+//!   union looks whole. The earlier copy of a shared border is left out
+//!   where its partner is written, as on screen ([`Mesh::partners`]).
+//! - *Dashes* are `stroke-dasharray`, with the dash's phase as the class's
+//!   `stroke-dashoffset`. SVG starts the pattern again at each subpath, so a
+//!   chain that starts part-way through it, by its distance along its line,
+//!   is a `<path>` of its own with its own offset; only chains that start at
+//!   the pattern's start share the class's one path.
 //! - *Points* are `<circle>`s of the class's point size, in its fill colour,
 //!   or, where the class has a [`crate::Marker`], its symbol: a `<use>` of
 //!   it placed, sized and turned as on screen, or for a mask a `<rect>` of
@@ -55,7 +64,7 @@
 
 use crate::camera::Camera;
 use crate::prepare::Mesh;
-use crate::style::{Align, Palette};
+use crate::style::{Align, Palette, Style};
 use crate::symbol::{Kind, Symbol, Symbols};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -72,6 +81,9 @@ pub struct SvgWriter {
     /// point elements: written to `body` when the layer ends.
     fills: BTreeMap<u8, String>,
     lines: BTreeMap<u8, String>,
+    /// Dashed chains that start part-way through their pattern, by class:
+    /// each one's `stroke-dashoffset` and path data.
+    runs: BTreeMap<u8, Vec<(f64, String)>>,
     points: String,
     /// The symbols markers draw, by id, and the ids a marker has used.
     symbols: BTreeMap<u16, Symbol>,
@@ -90,6 +102,7 @@ impl SvgWriter {
             layer: 0,
             fills: BTreeMap::new(),
             lines: BTreeMap::new(),
+            runs: BTreeMap::new(),
             points: String::new(),
             symbols: BTreeMap::new(),
             used: BTreeSet::new(),
@@ -117,8 +130,14 @@ impl SvgWriter {
         for (class, d) in std::mem::take(&mut self.fills) {
             let _ = writeln!(self.body, r#"<path class="f{layer}-{class}" d="{d}"/>"#);
         }
+        let mut runs = std::mem::take(&mut self.runs);
         for (class, d) in std::mem::take(&mut self.lines) {
-            let _ = writeln!(self.body, r#"<path class="l{layer}-{class}" d="{d}"/>"#);
+            if !d.is_empty() {
+                let _ = writeln!(self.body, r#"<path class="l{layer}-{class}" d="{d}"/>"#);
+            }
+            for (offset, d) in runs.remove(&class).unwrap_or_default() {
+                let _ = writeln!(self.body, r#"<path class="l{layer}-{class}" style="stroke-dashoffset:{}" d="{d}"/>"#, num(offset));
+            }
         }
         self.body.push_str(&std::mem::take(&mut self.points));
     }
@@ -181,44 +200,65 @@ impl SvgWriter {
             }
         }
 
-        // Outline segments chained into polylines, one path per class.
-        let lines = &mut self.lines;
-        let segments = mesh.outlines.chunks_exact(2);
-        let mut chain: Option<(u8, u32, u32)> = None; // class, first vertex, last vertex
-        let close = |lines: &mut BTreeMap<u8, String>, chain: Option<(u8, u32, u32)>| {
-            if let Some((class, first, last)) = chain
-                && first == last
-            {
-                lines.get_mut(&class).unwrap().push('Z');
-            }
+        // Outline segments chained into polylines (see the module docs).
+        let draws = |style: &Style| style.line_width > 0.0 && style.line[3] > 0.0;
+        let local = |i: u32| {
+            let v = &mesh.vertices[i as usize * 3..i as usize * 3 + 2];
+            [v[0] as f64, v[1] as f64]
         };
-        for s in segments {
+        let to_screen = |p: [f64; 2]| {
+            let f = &mesh.frame;
+            camera.map_to_screen([f.center[0] + p[0] * f.half_span, f.center[1] + p[1] * f.half_span])
+        };
+        let unit_px = mesh.frame.half_span / camera.units_per_px;
+        let mut chain: Option<Chain> = None;
+        for (k, s) in mesh.outlines.chunks_exact(2).enumerate() {
             let (a, b) = (s[0], s[1]);
             let class = class_of(a);
-            let style = palette.get(class);
-            if style.line_width <= 0.0 || style.line[3] <= 0.0 || !shown(a) {
+            if !draws(palette.get(class)) || !shown(a) {
                 continue;
             }
-            lines.entry(class).or_default();
-            match chain {
-                Some((c, first, last)) if c == class && last == a => chain = Some((c, first, b)),
-                _ => {
-                    close(lines, chain);
-                    let d = lines.get_mut(&class).unwrap();
-                    let [x, y] = screen(a);
-                    let _ = write!(d, "M{},{}", num(x), num(y));
-                    chain = Some((class, a, b));
+            if let Some(p) = mesh.partner(k) {
+                let pa = mesh.outlines[p * 2];
+                if shown(pa) && draws(palette.get(class_of(pa))) {
+                    continue;
                 }
             }
-            let d = lines.get_mut(&class).unwrap();
-            let [x, y] = screen(b);
-            let _ = write!(d, " {},{}", num(x), num(y));
+            let (la, lb) = (local(a), local(b));
+            // Along the tile's far edges, the neighbour's to write.
+            if (la[0] == 1.0 && lb[0] == 1.0) || (la[1] == 1.0 && lb[1] == 1.0) {
+                continue;
+            }
+            let Some((p, q)) = clip_to_own_area(la, lb) else { continue };
+            self.lines.entry(class).or_default();
+            if !matches!(&chain, Some(c) if c.class == class && p == la && c.last == Some(a)) {
+                if let Some(c) = chain.take() {
+                    c.finish(palette, &mut self.lines, &mut self.runs);
+                }
+                let along = mesh.distance(a) as f64 + (p[0] - la[0]).hypot(p[1] - la[1]);
+                let [x, y] = to_screen(p);
+                chain = Some(Chain { class, first: (p == la).then_some(a), last: None, along_px: along * unit_px, d: format!("M{},{}", num(x), num(y)) });
+            }
+            let c = chain.as_mut().unwrap();
+            let [x, y] = to_screen(q);
+            let _ = write!(c.d, " {},{}", num(x), num(y));
+            c.last = (q == lb).then_some(b);
         }
-        close(lines, chain);
-        for &class in lines.keys() {
+        if let Some(c) = chain.take() {
+            c.finish(palette, &mut self.lines, &mut self.runs);
+        }
+        for &class in self.lines.keys() {
             let style = palette.get(class);
             self.styles.entry(format!("l{layer}-{class}")).or_insert_with(|| {
-                format!("fill:none;stroke:{};stroke-width:{};stroke-linecap:round;stroke-linejoin:round", paint(style.line), num(style.line_width as f64))
+                let mut rule = format!("fill:none;stroke:{};stroke-width:{};stroke-linecap:round;stroke-linejoin:round", paint(style.line), num(style.line_width as f64));
+                if let Some(dash) = style.dash {
+                    let lengths: Vec<String> = dash.lengths().iter().map(|&l| num(l as f64)).collect();
+                    let _ = write!(rule, ";stroke-dasharray:{}", lengths.join(","));
+                    if dash.phase != 0.0 {
+                        let _ = write!(rule, ";stroke-dashoffset:{}", num(dash.phase as f64));
+                    }
+                }
+                rule
             });
         }
 
@@ -301,6 +341,69 @@ impl SvgWriter {
         out.push_str("</svg>\n");
         out
     }
+}
+
+/// A polyline of outline segments being written: its class, the vertex it
+/// began at and the one it reached, unless a tile edge cut them, how far
+/// along its line it starts in pixels, and its path data.
+struct Chain {
+    class: u8,
+    first: Option<u32>,
+    last: Option<u32>,
+    along_px: f64,
+    d: String,
+}
+
+impl Chain {
+    /// Closes the chain if it came back to its start, and adds it to its
+    /// class's path, or for a dash that it starts part-way through, to the
+    /// runs that take paths of their own.
+    fn finish(mut self, palette: &Palette, lines: &mut BTreeMap<u8, String>, runs: &mut BTreeMap<u8, Vec<(f64, String)>>) {
+        if self.first.is_some() && self.first == self.last {
+            self.d.push('Z');
+        }
+        if let Some(dash) = palette.get(self.class).dash {
+            let sum: f64 = dash.lengths().iter().map(|&l| l as f64).sum();
+            let period = if dash.lengths().len() % 2 == 1 { 2.0 * sum } else { sum };
+            let into = self.along_px.rem_euclid(period);
+            // Within a hundredth of a pixel, as `num` writes it.
+            if into >= 0.005 && period - into >= 0.005 {
+                let offset = (dash.phase as f64 + into).rem_euclid(period);
+                runs.entry(self.class).or_default().push((offset, self.d));
+                return;
+            }
+        }
+        lines.get_mut(&self.class).unwrap().push_str(&self.d);
+    }
+}
+
+/// The part of segment `a`--`b` inside the tile's own square, `|x|, |y| <=
+/// 1` in local units (Liang--Barsky), or `None`. Ends inside stay exactly as
+/// they were.
+fn clip_to_own_area(a: [f64; 2], b: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for axis in 0..2 {
+        for (p, q) in [(-d[axis], a[axis] + 1.0), (d[axis], 1.0 - a[axis])] {
+            if p == 0.0 {
+                if q < 0.0 {
+                    return None;
+                }
+            } else {
+                let r = q / p;
+                if p < 0.0 {
+                    t0 = t0.max(r);
+                } else {
+                    t1 = t1.min(r);
+                }
+            }
+        }
+    }
+    if t0 >= t1 {
+        return None;
+    }
+    let at = |t: f64| [(a[0] + t * d[0]).clamp(-1.0, 1.0), (a[1] + t * d[1]).clamp(-1.0, 1.0)];
+    Some((if t0 == 0.0 { a } else { at(t0) }, if t1 == 1.0 { b } else { at(t1) }))
 }
 
 /// An RGBA8 PNG of `pixels`, its deflate blocks stored uncompressed, so it
@@ -533,6 +636,77 @@ mod tests {
         b.set_feature(12);
         b.point([150.0, 50.0]);
         b.finish()
+    }
+
+    /// The `d` of every path of class `name`, joined.
+    fn path_data(out: &str, name: &str) -> String {
+        let key = format!("class=\"{name}\"");
+        out.lines().filter(|l| l.starts_with("<path") && l.contains(&key)).filter_map(|l| l.split(" d=\"").nth(1)).map(|d| d.trim_end_matches("\"/>")).collect()
+    }
+
+    #[test]
+    fn a_line_in_two_tiles_guard_bands_is_written_once() {
+        use crate::grid::TileFrame;
+        use crate::prepare::Detail;
+        let cam = camera();
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        for cx in [50.0, 150.0] {
+            let frame = TileFrame { center: [cx, 50.0], half_span: 50.0 };
+            let mut b = MeshBuilder::new(frame, Detail { tile_px: 100.0, grid_px: 0.25, guard_px: 10.0 });
+            b.set_class(1);
+            b.begin_line();
+            b.points(&[[20.0, 50.0], [180.0, 50.0]]);
+            b.end_line();
+            svg.draw(&b.finish(), &cam, &palette());
+        }
+        // Each tile its own half, where each would reach 10 into the other.
+        assert_eq!(path_data(&svg.finish(), "l0-1"), "M20,50 100,50M100,50 180,50");
+    }
+
+    #[test]
+    fn a_dashed_chain_part_way_through_its_pattern_has_its_own_offset() {
+        let cam = camera();
+        let mut b = MeshBuilder::for_view(&cam);
+        b.set_class(1);
+        b.begin_line();
+        b.points(&[[10.0, 20.0], [60.0, 20.0]]);
+        b.end_line();
+        b.set_line_start(7.0);
+        b.begin_line();
+        b.points(&[[10.0, 40.0], [60.0, 40.0]]);
+        b.end_line();
+        let mut palette = palette();
+        palette.set(1, Style { dash: crate::Dash::new(&[4.0, 2.0], 1.0), ..*palette.get(1) });
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.draw(&b.finish(), &cam, &palette);
+        let out = svg.finish();
+        assert!(out.contains(";stroke-dasharray:4,2;stroke-dashoffset:1}"), "{out}");
+        // The first line shares the class's path; the second starts 7
+        // along, so 1 + 7 into a pattern of 6.
+        assert!(out.contains(r#"<path class="l0-1" d="M10,80 60,80"/>"#), "{out}");
+        assert!(out.contains(r#"<path class="l0-1" style="stroke-dashoffset:2" d="M10,60 60,60"/>"#), "{out}");
+    }
+
+    #[test]
+    fn a_shared_border_is_written_once_and_whole_through_a_state() {
+        let cam = camera();
+        let mut b = MeshBuilder::for_view(&cam);
+        b.set_class(1);
+        for (id, x) in [(1, 10.0), (2, 50.0)] {
+            b.set_feature(id);
+            b.begin_polygon();
+            b.begin_ring();
+            b.points(&[[x, 10.0], [x + 40.0, 10.0], [x + 40.0, 40.0], [x, 40.0], [x, 10.0]]);
+            b.end_ring();
+            b.end_polygon();
+        }
+        let mesh = b.finish();
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.draw(&mesh, &cam, &palette());
+        // The first square's right side is left to the second.
+        assert_eq!(path_data(&svg.finish(), "l0-1"), "M10,90 50,90M50,60 10,60 10,90M50,90 90,90 90,60 50,60 50,90Z");
+        // Only the first holding the state: it writes the side itself.
+        assert_eq!(path_data(&write_state(&mesh, &cam, 1, &[1, 0], 1), "l1-1"), "M10,90 50,90 50,60 10,60 10,90Z");
     }
 
     fn write_state(mesh: &Mesh, cam: &Camera, first: u32, flags: &[u8], mask: u8) -> String {

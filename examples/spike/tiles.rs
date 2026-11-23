@@ -10,11 +10,11 @@
 //! cache before the frame draws and no stand-in is ever shown. A real
 //! embedder fetches asynchronously and draws whatever the plan says now.
 
-use crate::data::{self, Counties, Icons, MARKER_BASE, Markers, Overlay};
+use crate::data::{self, Counties, Icons, MARKER_BASE, Markers, Outlines, Overlay};
 use nazca::gl::{Context, GpuColormap, GpuMesh, GpuPalette, GpuRaster, GpuState, Pick, Picker, Renderer};
-use nazca::grid::TileFrame;
+use nazca::grid::{Rect, TileFrame};
 use nazca::svg::SvgWriter;
-use nazca::{Camera, Detail, Mesh, MeshBuilder, Palette, Plan, Style, TileCache, TileGrid, TileId, TileKey, TileSelector};
+use nazca::{Camera, Dash, Detail, Mesh, MeshBuilder, Palette, Plan, Sink, Style, TileCache, TileGrid, TileId, TileKey, TileSelector};
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -28,11 +28,12 @@ pub const HOVERED: u8 = 2;
 const SHOWN: u8 = 4;
 
 fn selected_style() -> Palette {
-    data::highlight([1.0, 0.55, 0.0, 0.45], [0.85, 0.3, 0.0, 1.0], 2.5)
+    data::highlight([1.0, 0.55, 0.0, 0.45], [0.85, 0.3, 0.0, 1.0], 2.5, None)
 }
 
-fn hovered_style() -> Palette {
-    data::highlight([0.0; 4], [0.1, 0.35, 0.95, 1.0], 4.0)
+/// A hovered county's outline, dashed when the counties' are.
+fn hovered_style(outlines: Outlines) -> Palette {
+    data::highlight([0.0; 4], [0.1, 0.35, 0.95, 1.0], 4.0, outlines.highlight_dash())
 }
 
 /// A tile on the GPU and the span of county ids in it.
@@ -61,6 +62,7 @@ pub struct TiledMap {
     raster: Option<(GpuRaster, GpuColormap)>,
     icons: Icons,
     markers: Markers,
+    outlines: Outlines,
 }
 
 /// What the last frame did.
@@ -87,17 +89,18 @@ impl TiledMap {
             cache: TileCache::new(budget),
             states: HashMap::new(),
             selected: renderer.palette(gl, &selected_style()).unwrap(),
-            hovered: renderer.palette(gl, &hovered_style()).unwrap(),
+            hovered: renderer.palette(gl, &hovered_style(Outlines::Solid)).unwrap(),
             last_pick: None,
             filtered: false,
             needed: Vec::new(),
             plan: Plan::default(),
-            palette: renderer.palette(gl, &data::palette(Markers::None, &icons)).unwrap(),
+            palette: renderer.palette(gl, &data::palette(Markers::None, Outlines::Solid, &icons)).unwrap(),
             picker: Picker::new(gl).unwrap(),
             overlay: Overlay::None,
             raster: None,
             icons,
             markers: Markers::None,
+            outlines: Outlines::Solid,
         };
         map.set_overlay(gl, renderer, overlay);
         map
@@ -105,6 +108,10 @@ impl TiledMap {
 
     pub fn bounds(&self) -> nazca::grid::Rect {
         self.counties.bounds
+    }
+
+    pub fn counties(&self) -> &Counties {
+        &self.counties
     }
 
     pub fn overlay(&self) -> Overlay {
@@ -136,10 +143,22 @@ impl TiledMap {
     /// palette is checked against the guard band the tiles are prepared
     /// with.
     pub fn set_markers(&mut self, gl: &Context, renderer: &Renderer, markers: Markers) {
-        let palette = data::palette(markers, &self.icons);
+        let palette = data::palette(markers, self.outlines, &self.icons);
         palette.check_reach(&self.icons.symbols, Detail::default().guard_px).unwrap();
         renderer.update_palette(gl, &self.palette, &palette);
         self.markers = markers;
+    }
+
+    pub fn outlines(&self) -> Outlines {
+        self.outlines
+    }
+
+    /// Restyles the counties' outlines, and a hovered county's to match:
+    /// palette uploads, no tile touched.
+    pub fn set_outlines(&mut self, gl: &Context, renderer: &Renderer, outlines: Outlines) {
+        self.outlines = outlines;
+        renderer.update_palette(gl, &self.palette, &data::palette(self.markers, outlines, &self.icons));
+        renderer.update_palette(gl, &self.hovered, &hovered_style(outlines));
     }
 
     /// Draws one frame of `camera`'s view, preparing and uploading the tiles
@@ -275,13 +294,13 @@ impl TiledMap {
         let mut svg = SvgWriter::new(camera.size_px, Some(data::BACKGROUND));
         svg.symbols(&self.icons.symbols);
         svg.begin_layer();
-        let palette = data::palette(self.markers, &self.icons);
+        let palette = data::palette(self.markers, self.outlines, &self.icons);
         if self.filtered {
             svg.draw_state(&mesh, camera, &palette, 0, &self.flags, SHOWN);
         } else {
             svg.draw(&mesh, camera, &palette);
         }
-        for (bit, palette) in [(SELECTED, selected_style()), (HOVERED, hovered_style())] {
+        for (bit, palette) in [(SELECTED, selected_style()), (HOVERED, hovered_style(self.outlines))] {
             svg.begin_layer();
             svg.draw_state(&mesh, camera, &palette, 0, &self.flags, bit);
         }
@@ -336,16 +355,7 @@ const GRID: u32 = 50;
 
 /// A `GRID` x `GRID` mesh of one small feature a cell, with ids from `base`.
 fn grid_mesh(kind: Kind, base: u32) -> Mesh {
-    let mut m = Mesh {
-        frame: TileFrame { center: [0.0, 0.0], half_span: 1.0 },
-        vertices: Vec::new(),
-        fills: Vec::new(),
-        outlines: Vec::new(),
-        points: Vec::new(),
-        rings: Vec::new(),
-        polygons: Vec::new(),
-        ids: Vec::new(),
-    };
+    let mut m = Mesh::new(TileFrame { center: [0.0, 0.0], half_span: 1.0 });
     for n in 0..GRID * GRID {
         let [x, y] = cell_centre(n);
         let i = m.vertex_count() as u32;
@@ -460,4 +470,254 @@ pub fn check_state(gl: &Context, renderer: &Renderer, size: [u32; 2]) -> Result<
     picker.free(gl);
     palette.free(gl);
     Ok(format!("state check passed: {checked} features read back, {picked} picked"))
+}
+
+/// Checks dashes and shared borders on three rectangles drawn from one
+/// tile, one wide over two narrow, so its bottom edge meets theirs at a
+/// T-junction, by reading the framebuffer:
+///
+/// - a translucent outline is no darker on a shared border than on one of
+///   its own, so each shared stretch is drawn once;
+/// - a dashed outline covers as much of a shared border as of one of its
+///   own, and not all of it, so the dash test runs and a shared border is
+///   one pattern, not two out of phase;
+/// - each rectangle drawn alone through a state has every side, so a
+///   suppressed copy still draws where its partner doesn't, and so does the
+///   wide one when the narrow ones' class has no line;
+/// - a dashed line cut into two tiles' pieces, the second given where it
+///   starts, draws the pixels the whole line does, and without the start
+///   doesn't.
+///
+/// Then measures what a picture can't settle: how far a line start
+/// measured on a wiggly coastline misses nazca's own measure at a seam,
+/// the jitter `f32` distances give a line 1,000 and 5,000 km along at the
+/// grid's deepest level, and what matching shared borders costs to
+/// prepare, timed by `clock` in milliseconds (`std::time::Instant` panics
+/// in a browser).
+pub fn check_dashes(gl: &Context, renderer: &Renderer, counties: &Counties, size: [u32; 2], clock: &dyn Fn() -> f64) -> Result<String, String> {
+    let [w, h] = size.map(|v| v as usize);
+    let camera = Camera::new([200.0, 100.0], 1.0, size);
+    let frame = TileFrame { center: [200.0, 100.0], half_span: 200.0 };
+    let mut b = MeshBuilder::new(frame, Detail { tile_px: 400.0, grid_px: 0.25, guard_px: 0.0 });
+    // The wide one in class 2, the narrow ones in class 1.
+    for (id, [x0, y0, x1, y1]) in [[100.0, 100.0, 300.0, 160.0], [100.0, 40.0, 200.0, 100.0], [200.0, 40.0, 300.0, 100.0]].into_iter().enumerate() {
+        b.set_class(if id == 0 { 2 } else { 1 });
+        b.set_feature(id as u32);
+        b.begin_polygon();
+        b.begin_ring();
+        b.points(&[[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]);
+        b.end_ring();
+        b.end_polygon();
+    }
+    let mesh = renderer.upload(gl, &b.finish())?;
+    // A map point's blue, the camera putting a unit on a pixel.
+    let blue = |pixels: &[u8], [x, y]: [f64; 2]| {
+        let px = (x - 200.0 + w as f64 / 2.0) as usize;
+        let py = (y - 100.0 + h as f64 / 2.0) as usize;
+        pixels[(py * w + px) * 4 + 2]
+    };
+    let style = |line: [f32; 4], width: f32, dash: Option<Dash>| {
+        let mut s = Style::default();
+        s.line = line;
+        s.line_width = width;
+        s.dash = dash;
+        let mut p = Palette::new();
+        p.set(1, s);
+        p.set(2, s);
+        renderer.palette(gl, &p)
+    };
+    let frame_with = |palette: &GpuPalette, state: Option<&GpuState>| {
+        renderer.begin_frame(gl, &camera, [0.0, 0.0, 0.0, 1.0]);
+        renderer.begin_layer(gl);
+        match state {
+            Some(state) => renderer.draw_state(gl, &mesh, &camera, palette, state, 1),
+            None => renderer.draw(gl, &mesh, &camera, palette),
+        }
+        gl.read_pixels(size)
+    };
+    const SHARED: [[f64; 2]; 3] = [[150.0, 100.0], [250.0, 100.0], [200.0, 70.0]];
+    const OWN: [[f64; 2]; 4] = [[150.0, 160.0], [100.0, 70.0], [300.0, 70.0], [250.0, 40.0]];
+    let mut report = Vec::new();
+
+    let translucent = style([0.0, 0.0, 1.0, 0.5], 6.0, None)?;
+    let pixels = frame_with(&translucent, None);
+    let own: Vec<u8> = OWN.iter().map(|&p| blue(&pixels, p)).collect();
+    let shared: Vec<u8> = SHARED.iter().map(|&p| blue(&pixels, p)).collect();
+    if own.iter().chain(&shared).any(|&v| v.abs_diff(own[0]) > 6) || own[0] < 100 {
+        return Err(format!("a translucent outline's blue: {own:?} on borders of one, {shared:?} on shared ones"));
+    }
+    report.push(format!("translucent blue {} on every border", own[0]));
+    translucent.free(gl);
+
+    // Along the narrow ones' shared side, and the first's own left side.
+    let dashed = style([0.0, 0.0, 1.0, 1.0], 3.0, Dash::new(&[8.0, 8.0], 0.0))?;
+    let pixels = frame_with(&dashed, None);
+    let covered = |x: f64| (45..95).filter(|&y| blue(&pixels, [x, y as f64]) > 127).count() as f64 / 50.0;
+    let (shared, own) = (covered(200.0), covered(100.0));
+    if !(0.4..0.85).contains(&own) || (shared - own).abs() > 0.15 {
+        return Err(format!("dashes cover {own:.2} of a border of one and {shared:.2} of a shared one"));
+    }
+    report.push(format!("dashes cover {own:.2} of a border of one, {shared:.2} of a shared one"));
+    dashed.free(gl);
+
+    let solid = style([0.0, 0.0, 1.0, 1.0], 4.0, None)?;
+    let sides: [&[[f64; 2]]; 3] = [&[[150.0, 100.0], [250.0, 100.0], [150.0, 160.0]], &[[150.0, 100.0], [200.0, 70.0], [100.0, 70.0]], &[[250.0, 100.0], [200.0, 70.0], [300.0, 70.0]]];
+    for (id, points) in sides.iter().enumerate() {
+        let mut flags = [0u8; 3];
+        flags[id] = 1;
+        let state = renderer.state(gl, 0, &flags)?;
+        let pixels = frame_with(&solid, Some(&state));
+        state.free(gl);
+        if let Some(p) = points.iter().find(|&&p| blue(&pixels, p) < 200) {
+            return Err(format!("rectangle {id} alone through a state lacks its side at {p:?}"));
+        }
+    }
+    report.push("each rectangle alone through a state has every side".into());
+    solid.free(gl);
+    let mut p = Palette::new();
+    p.set(2, {
+        let mut s = Style::default();
+        s.line = [0.0, 0.0, 1.0, 1.0];
+        s.line_width = 4.0;
+        s
+    });
+    let wide_only = renderer.palette(gl, &p)?;
+    let pixels = frame_with(&wide_only, None);
+    if let Some(p) = [[150.0, 100.0], [250.0, 100.0]].into_iter().find(|&p| blue(&pixels, p) < 200) {
+        return Err(format!("the wide rectangle's bottom is missing at {p:?} when the narrow ones have no line"));
+    }
+    report.push("a border left to a class with no line is drawn by the other".into());
+    wide_only.free(gl);
+    mesh.free(gl);
+
+    // A dashed line along y = 130, whole in one tile, then in two tiles'
+    // halves meeting at x = 200.
+    let dashed = style([0.0, 0.0, 1.0, 1.0], 3.0, Dash::new(&[8.0, 8.0], 0.0))?;
+    let line = |center: [f64; 2], half_span: f64, from: f64, to: f64, start: Option<f64>| {
+        let mut b = MeshBuilder::new(TileFrame { center, half_span }, Detail { tile_px: 2.0 * half_span, grid_px: 0.25, guard_px: 0.0 });
+        b.set_class(1);
+        if let Some(start) = start {
+            b.set_line_start(start);
+        }
+        b.begin_line();
+        b.points(&[[from, 130.0], [to, 130.0]]);
+        b.end_line();
+        renderer.upload(gl, &b.finish())
+    };
+    let row = |meshes: &[GpuMesh]| -> Vec<u8> {
+        renderer.begin_frame(gl, &camera, [0.0, 0.0, 0.0, 1.0]);
+        renderer.begin_layer(gl);
+        for m in meshes {
+            renderer.draw(gl, m, &camera, &dashed);
+        }
+        let pixels = gl.read_pixels(size);
+        (30..370).map(|x| blue(&pixels, [x as f64, 130.0])).collect()
+    };
+    let whole = [line([200.0, 100.0], 200.0, 20.0, 380.0, None)?];
+    let started = [line([100.0, 100.0], 100.0, 20.0, 200.0, None)?, line([300.0, 100.0], 100.0, 200.0, 380.0, Some(180.0))?];
+    let restarted = [line([100.0, 100.0], 100.0, 20.0, 200.0, None)?, line([300.0, 100.0], 100.0, 200.0, 380.0, None)?];
+    let differ = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(a, b)| a.abs_diff(**b) > 64).count();
+    let reference = row(&whole);
+    let (with, without) = (differ(&reference, &row(&started)), differ(&reference, &row(&restarted)));
+    if with > 2 || without < 20 {
+        return Err(format!("a line in two tiles' pieces differs from it whole at {with} pixels with its start, {without} without"));
+    }
+    report.push(format!("a dashed line in two tiles' pieces differs from it whole at {with} of 340 pixels with its start, {without} without"));
+    for m in whole.into_iter().chain(started).chain(restarted) {
+        m.free(gl);
+    }
+    dashed.free(gl);
+
+    let grid = TileGrid::web_mercator(512, 20).unwrap();
+    let tile_at = |z: u8, p: [f64; 2]| grid.tiles_in(z, Rect { min: p, max: p }).next().unwrap();
+
+    // The coastline cut at its middle vertex, the second piece starting
+    // where the first ends by the coastline's own length.
+    let ring = counties.longest_ring("Barnstable").ok_or("no Barnstable")?;
+    let m = ring.len() / 2;
+    let length: f64 = ring[..=m].windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+    let mut jumps = Vec::new();
+    for z in [6, 8, 10, 12, 14, 16] {
+        let id = tile_at(z, ring[m]);
+        let mut b = MeshBuilder::for_tile(&grid, id).unwrap();
+        b.begin_line();
+        b.points(&ring[..=m]);
+        b.end_line();
+        let mesh = b.finish();
+        let measured = *mesh.distances.last().unwrap() as f64 * mesh.frame.half_span;
+        jumps.push(format!("z{z} {:.1}", (length - measured) / grid.resolution(z).unwrap()));
+    }
+    report.push(format!("Barnstable's coast, {} vertices, cut at its middle: the seam jumps (px) {}", ring.len(), jumps.join(", ")));
+
+    // The fixture's coasts are simplified; a line wiggling 5 m either side
+    // every 10 m, for 20 km, is what a detailed source hands in.
+    let origin = counties.centre(0);
+    let wiggly: Vec<[f64; 2]> = (0..=2000).map(|i| [origin[0] + i as f64 * 10.0, origin[1] + if i % 2 == 0 { -5.0 } else { 5.0 }]).collect();
+    let length: f64 = wiggly.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+    let end = wiggly[wiggly.len() - 1];
+    let mut jumps = Vec::new();
+    for z in [8, 10, 12, 14, 16, 18] {
+        let id = tile_at(z, end);
+        let mut b = MeshBuilder::for_tile(&grid, id).unwrap();
+        b.begin_line();
+        b.points(&wiggly);
+        b.end_line();
+        let mesh = b.finish();
+        let measured = *mesh.distances.last().unwrap() as f64 * mesh.frame.half_span;
+        jumps.push(format!("z{z} {:.1}", (length - measured) / grid.resolution(z).unwrap()));
+    }
+    report.push(format!("a 20 km line wiggling 5 m every 10 m: the seam after it jumps (px) {}", jumps.join(", ")));
+
+    // A wiggling line on the grid's own points, so snapping moves nothing
+    // and the distances nazca measures in `f64` are known exactly.
+    let z = grid.max_zoom();
+    let id = tile_at(z, counties.centre(0));
+    let f = grid.frame(id).unwrap();
+    let step = f.half_span / 1024.0; // a quarter pixel
+    let res = grid.resolution(z).unwrap();
+    for start in [1e6, 5e6] {
+        let mut b = MeshBuilder::for_tile(&grid, id).unwrap();
+        let points: Vec<[f64; 2]> = (0..150).map(|i| [f.center[0] + (i * 12 - 1000) as f64 * step, f.center[1] + (i % 2 * 4) as f64 * step]).collect();
+        b.set_line_start(start);
+        b.begin_line();
+        b.points(&points);
+        b.end_line();
+        let mesh = b.finish();
+        let unit = (mesh.frame.half_span / res) as f32;
+        let (mut exact, mut worst, mut jitter, mut last) = (start, 0.0f64, 0.0f64, None::<f64>);
+        for (i, &d) in mesh.distances.iter().enumerate() {
+            if i > 0 {
+                exact += (points[i][0] - points[i - 1][0]).hypot(points[i][1] - points[i - 1][1]);
+            }
+            // As the shader multiplies, in `f32`.
+            let err = (d * unit) as f64 - exact / res;
+            worst = worst.max(err.abs());
+            if let Some(l) = last {
+                jitter = jitter.max((err - l).abs());
+            }
+            last = Some(err);
+        }
+        report.push(format!("a line {} km along at z{z}: phase off by up to {worst:.2} px, {jitter:.2} px between vertices", start / 1000.0));
+    }
+
+    // Matching shared borders, over the counties' tiles at z10.
+    let (mut feed, mut finish, mut segments, mut paired) = (0.0, 0.0, 0, 0);
+    for id in grid.tiles_in(10, counties.bounds) {
+        let mut b = MeshBuilder::for_tile(&grid, id).unwrap();
+        let reach = grid.bounds(id).unwrap().expand(Detail::default().guard_px * grid.resolution(10).unwrap());
+        let t = clock();
+        counties.prepare_into(&mut b, reach);
+        feed += clock() - t;
+        let t = clock();
+        let mesh = b.finish();
+        finish += clock() - t;
+        segments += mesh.outlines.len() / 2;
+        paired += mesh.partners.iter().filter(|&&p| p != Mesh::NO_PARTNER).count();
+    }
+    report.push(format!(
+        "z10: {segments} outline segments, {paired} paired; feeding {feed:.1} ms, matching (finish) {finish:.1} ms; partners {} KB of {} KB of segments",
+        segments * 8 / 1024,
+        segments * 36 / 1024
+    ));
+    Ok(format!("dash check passed:\n  {}", report.join("\n  ")))
 }
