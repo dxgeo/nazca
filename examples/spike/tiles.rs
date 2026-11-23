@@ -481,6 +481,8 @@ pub fn check_state(gl: &Context, renderer: &Renderer, size: [u32; 2]) -> Result<
 /// - a dashed outline covers as much of a shared border as of one of its
 ///   own, and not all of it, so the dash test runs and a shared border is
 ///   one pattern, not two out of phase;
+/// - panned a whole number of pixels, the dashed outlines are the first
+///   frame shifted, so dashes move with the map rather than crawl along it;
 /// - each rectangle drawn alone through a state has every side, so a
 ///   suppressed copy still draws where its partner doesn't, and so does the
 ///   wide one when the narrow ones' class has no line;
@@ -559,6 +561,28 @@ pub fn check_dashes(gl: &Context, renderer: &Renderer, counties: &Counties, size
         return Err(format!("dashes cover {own:.2} of a border of one and {shared:.2} of a shared one"));
     }
     report.push(format!("dashes cover {own:.2} of a border of one, {shared:.2} of a shared one"));
+
+    // Panned a whole number of pixels, the dashes move with the map: the
+    // frame is the first one shifted, not a pattern sliding along its line.
+    let [dx, dy] = [37usize, 23usize];
+    let panned = Camera::new([200.0 + dx as f64, 100.0 + dy as f64], 1.0, size);
+    renderer.begin_frame(gl, &panned, [0.0, 0.0, 0.0, 1.0]);
+    renderer.begin_layer(gl);
+    renderer.draw(gl, &mesh, &panned, &dashed);
+    let moved = gl.read_pixels(size);
+    let (mut differ, mut most) = (0, 0u8);
+    for y in 0..h - dy {
+        for x in 0..w - dx {
+            let (a, b) = (&pixels[((y + dy) * w + x + dx) * 4..][..4], &moved[(y * w + x) * 4..][..4]);
+            let d = a.iter().zip(b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+            most = most.max(d);
+            differ += (d > 8) as usize;
+        }
+    }
+    if differ > 0 {
+        return Err(format!("panned {dx}, {dy} px, the dashed outlines differ from the first frame shifted at {differ} pixels"));
+    }
+    report.push(format!("panned {dx}, {dy} px, the dashed outlines are the first frame shifted, no channel off by more than {most}"));
     dashed.free(gl);
 
     let solid = style([0.0, 0.0, 1.0, 1.0], 4.0, None)?;

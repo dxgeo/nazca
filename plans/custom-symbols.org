@@ -712,10 +712,13 @@ Ruled out:
     matched. The spike has no lines, so a synthetic one, cut into pieces
     with starts: the pattern runs on across tile edges, the jump at each
     seam measured, not assumed 0, at a low zoom on a wiggly line; without
-    starts it restarts. It doesn't crawl as the map pans (not yet run). Run:
+    starts it restarts. It doesn't crawl as the map pans. Run:
     three rectangles meeting at a T-junction, read back: a translucent
     outline the same blue (128) on shared borders and borders of one; a
-    dash pattern covering 0.60 of each; each rectangle whole through a
+    dash pattern covering 0.60 of each; panned 37 by 23 pixels, the
+    dashed rectangles the first frame shifted, no channel off by more than
+    1 natively and 0 in Chrome (run 2026-11-23, and failing at 2,441
+    pixels with the phase tied to the screen); each rectangle whole through a
     state, and the wide one's border drawn when the narrow ones' class
     has no line; a dashed line in two tiles' pieces matching it whole at
     every pixel with its start, and differing at 105 of 340 without. Each

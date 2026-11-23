@@ -37,8 +37,6 @@ with =textureGrad=, =<pattern>= in SVG. § Pattern fills and its § CHECKS
 entry have the design.
 
 ** ALSO OPEN
-- *The crawl check hasn't run.* § CHECKS asks that dashes don't crawl as
-  the map pans.
 - *Darker dots at a translucent line's vertices.* Each segment's round end
   overlaps the next one's, so the line blends twice there. This is a known
   limit, in plans/rendering.org § BACKENDS, from before this branch and
