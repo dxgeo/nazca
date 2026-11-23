@@ -25,11 +25,12 @@
 //!   distance along its line, so dash ends are round too and an on length of
 //!   0 is a dot. A run of segments chained end to start shares a base
 //!   distance and each carries its offset from it, so a run far along its
-//!   line keeps one phase: `f32` loses the base's pixels by up to a few
-//!   there, but alike for every segment, a jump at the run's ends rather
-//!   than a jitter at each vertex. A segment whose partner draws the same stretch of a shared
-//!   border ([`Mesh::partners`]) collapses wherever the partner is drawn: its
-//!   class has a line, and in a state draw it holds the state.
+//!   line keeps one phase: `f32` loses the base's pixels, up to about one
+//!   1,000 km along at the deepest level, but alike for every segment, a
+//!   jump at the run's ends rather than a jitter at each vertex. A segment
+//!   whose partner draws the same stretch of a shared border
+//!   ([`Mesh::partners`]) collapses wherever the partner is drawn: its class
+//!   has a line, and in a state draw it holds the state.
 //! - *Points* are an instanced quad each, drawn by one program: a round dot
 //!   in the fill colour, or, where the class has a [`crate::Marker`], its
 //!   symbol sized by the point size, placed by its anchor and turned against

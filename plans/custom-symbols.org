@@ -17,10 +17,9 @@ markers are byte-identical to step 1's. Their SVG markup moved to step 5
 and checked natively and in Chrome's WebGL2. Its two additions, decided
 2026-11-23 (user decision) from its measurements (§ CHECKS), are built
 (2026-11-23) and checked natively and in Chrome's WebGL2: the far line
-start's jitter cured by a
-run's shared base, and =MeshBuilder::line_length=, measuring a line as
-nazca does, so a line start joins exactly. Step 4 is next. Step 7, vector
-symbols, waits on
+start's jitter cured by a run's shared base, and
+=MeshBuilder::line_length=, measuring a line as nazca does, so a line
+start joins exactly. Step 4 is next. Step 7, vector symbols, waits on
 § OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
 symbol at a time. Markers, dashes and pattern fills are three parts that
 share an atlas and a palette layout, so each can be built once the shared
@@ -285,8 +284,8 @@ Ruled out:
   so the phase follows the geometry the embedder handed in rather than
   restarting at nazca's own clip. =Mesh= becomes =#[non_exhaustive]= with
   it, as only =MeshBuilder= builds one. A segment instance carries its
-  start's distance (=SEGMENT_BYTES= 24 to 28, and 36 with a shared
-  border's partner, below). The shader gets the rest from the segment's
+  start's distance (=SEGMENT_BYTES= 24 to 28, 36 with a shared border's
+  partner, below, and 40 with a run's base, below that). The shader gets the rest from the segment's
   length.
 - *Far along a line, a run shares a base.* A vertex 1,000 km along its line
   is millions of pixels along at a deep level, past what an =f32= holds to
@@ -666,7 +665,11 @@ Ruled out:
    longer outlined twice). Built 2026-11-23, with the dash check
    (=--check-dashes=, X in the browser) and the counties' outlines dashed,
    dotted and translucent (=--outlines=, D); checked natively and in
-   Chrome's WebGL2.
+   Chrome's WebGL2. Its two additions built 2026-11-23, the same way:
+   =Mesh::distances= as =f64= with a run's base in the segment instance
+   (=SEGMENT_BYTES= 40), and =MeshBuilder::line_length=; the dash check
+   gained the pan, the seams measured by =line_length= and the far line's
+   phase at a fractional zoom.
 4. *Pattern fills*: the anchor uniform, =FILL_FS='s pattern sample,
    =<pattern>= in SVG.
 5. *=Symbol::from_svg=* behind the =symbols= feature (§ OPEN QUESTIONS 1),
@@ -675,7 +678,8 @@ Ruled out:
    (§ OPEN QUESTIONS 8).
 6. *The README* (a section on symbols: kinds, sizes and the quarter floor
    on drawing them small, the guard band rule, how round ends lengthen
-   dashes, what SVG output writes; its palette
+   dashes, a line handed in as pieces started by =line_length=, what SVG
+   output writes; its palette
    example built from =Style::default()= by assignment; its setup building
    a =gl::Context= in place of a =glow= one) and *a release*, 0.3.0 as
    § OPEN QUESTIONS 6 says, its notes covering both breaks.

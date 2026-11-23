@@ -481,7 +481,10 @@ Not a backend but also feature-gated: =mvt= (decoder, no dependency;
   overlap (darker dots at vertices), which doesn't show with opaque lines.
   /Changed 2026-11-23, with dashes (plans/custom-symbols.org § OPEN
   QUESTIONS 9):/ a border two polygons share was outlined by both; it is
-  now drawn once, by the last feature fed that outlines it.
+  now drawn once, by the last feature fed that outlines it. Dashes
+  thousands of kilometres along a line, at the deepest levels, jump by up
+  to about a pixel where one tile's run of segments meets the next
+  (plans/custom-symbols.org § Dashes, /Far along a line/).
 - /Changed 2026-10-30, with the SVG backend: no separate draw-command
   buffer./ The prepared =Mesh= is already flat =f32= / =u32= buffers, and it
   is what both backends replay. The GPU takes its triangles and outline
