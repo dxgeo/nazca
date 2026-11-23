@@ -150,7 +150,10 @@ plans/custom-symbols.org § Dashes):/ each vertex also carries its distance
 along its line or ring (=Mesh::distances=), measured before clipping, for
 dashes; and =finish= matches ring edges that two rings share, so a shared
 border is drawn once (=Mesh::partners=). =Mesh= is =#[non_exhaustive]=,
-built by =MeshBuilder= or =Mesh::new=.
+built by =MeshBuilder= or =Mesh::new=. Distances are =f64=, the one buffer
+that isn't =f32=: far along a long line they run to millions of pixels.
+=MeshBuilder::line_length= measures a line as a tile at its level does, so
+a line handed in as pieces starts each where the one before ends, exactly.
 
 Prepared tiles are flat =Vec<f32>= / =Vec<u32>= buffers. In the browser they
 cross from a Web Worker to the main thread as zero-copy transferable

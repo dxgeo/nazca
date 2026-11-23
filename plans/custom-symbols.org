@@ -14,11 +14,11 @@ pixels, natively and in Chrome's WebGL2, and the spike's views without
 markers are byte-identical to step 1's. Their SVG markup moved to step 5
 (§ OPEN QUESTIONS 8, decided 2026-11-22). Step 3, reviewed 2026-11-22
 (shared borders drawn once, § OPEN QUESTIONS 9), is built (2026-11-23)
-and checked natively and in Chrome's WebGL2. Two additions to it come
-next, decided 2026-11-23 (user decision) from its measurements (§ CHECKS):
-the far line start's jitter cured by a run's shared base, and a function
-that measures a line as nazca does, so a line start joins exactly. Then
-step 4. ../HANDOFF.org has both. Step 7, vector
+and checked natively and in Chrome's WebGL2. Its two additions, decided
+2026-11-23 (user decision) from its measurements (§ CHECKS), are built
+(2026-11-23) and checked natively: the far line start's jitter cured by a
+run's shared base, and =MeshBuilder::line_length=, measuring a line as
+nazca does, so a line start joins exactly. Step 4 is next. Step 7, vector
 symbols, waits on
 § OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
 symbol at a time. Markers, dashes and pattern fills are three parts that
@@ -287,6 +287,19 @@ Ruled out:
   start's distance (=SEGMENT_BYTES= 24 to 28, and 36 with a shared
   border's partner, below). The shader gets the rest from the segment's
   length.
+- *Far along a line, a run shares a base.* A vertex 1,000 km along its line
+  is millions of pixels along at a deep level, past what an =f32= holds to
+  a pixel, so each vertex's phase would jitter (§ CHECKS, /A far line
+  start/). =Mesh::distances= are =f64=, and the upload splits them: a run
+  of segments, each starting where the last ended with its distance rising,
+  shares a base, its first distance as an =f32=, and each segment carries
+  its offset from it (=SEGMENT_BYTES= 40). =LINE_VS= reduces the base's
+  pixels modulo the pattern before adding the offset's, so the run loses
+  its phase by one error, the same at each vertex: a jump where the run
+  meets the next, with no jitter between. The run is found at upload, not
+  stored in =Mesh=: a clipped line's re-entry and a ring's closing edge,
+  where its distance falls back to 0, each start one. The SVG writer
+  reads the =f64= distance and needs no split.
 - *Clipped rings carry their distances through clipping.* Lines are
   clipped a segment at a time (=end_line_run=) and take the distance at
   each cut by interpolation. A ring is rebuilt by Sutherland--Hodgman
@@ -305,9 +318,15 @@ Ruled out:
   snapping drops the wiggles finer than its grid and moves every vertex,
   so on a line of many short segments the measured length parts from the
   source's at every zoom, not only low ones, and the seam jumps by the
-  difference (§ CHECKS, measured 2026-11-23: 12 to 181 pixels). A function
-  measuring a line as nazca does, so a start joins exactly, comes next
-  (decided 2026-11-23, user decision). Measuring the source's own geometry instead
+  difference (§ CHECKS, measured 2026-11-23: 12 to 181 pixels). So
+  =MeshBuilder::line_length(xy)= measures a piece as nazca does, snapped to
+  the builder's grid and decimated as =points= takes it, in map units; the
+  pieces before, measured so and summed, start the next exactly (decided
+  2026-11-23, user decision; built 2026-11-23). On =MeshBuilder= rather
+  than =TileGrid=, since a layout's builder (=for_view=) has a grid no
+  =TileGrid= level names; the grid is fixed in map units for a level, so a
+  builder for any tile at the level measures alike, and an embedder
+  measures each piece once a level. Measuring the source's own geometry instead
   would stretch each dash by the line's simplification and part the screen
   from SVG output, whose =stroke-dasharray= dashes the path as drawn. A
   feature handed whole to every tile needs no start: each tile at a level
@@ -712,7 +731,13 @@ Ruled out:
     shortens it. So a start the embedder measures itself joins only on
     lines of few, long segments; one measured as nazca measures, on the
     level's own grid, would join exactly. Decided 2026-11-23 (user
-    decision): add that function, next, before step 4.
+    decision): add that function, before step 4. Built 2026-11-23,
+    =MeshBuilder::line_length=, and run natively: both lines' pieces
+    measured by it in the tile where the first piece starts, not the
+    seam's, jump 0.0 pixels at every level (the check fails past 0.01),
+    beside the source-measured jumps above. A unit test cuts a wiggly line
+    into three pieces measured by the next tile over and gets the whole
+    line's distances. Chrome's WebGL2 not run yet.
   - /A far line start/: an =f32= distance loses the phase by about the
     distance in pixels times 6 x 10^-8 at each vertex: 0.2 pixels for a
     piece 1,000 km along its line at z18, 4 pixels for 5,000 km at z20. A
@@ -724,8 +749,15 @@ Ruled out:
     seam, with no jitter between its vertices. Measured 2026-11-23, as the
     shader multiplies in =f32=, at z20: 1,000 km along, the phase off by up
     to 0.50 pixels and 0.84 between neighbouring vertices; 5,000 km, 2.00
-    and 3.16. Decided 2026-11-23 (user decision): build the cure, next,
-    before step 4.
+    and 3.16. Decided 2026-11-23 (user decision): build the cure, before
+    step 4. Built 2026-11-23 (§ Dashes, /Far along a line/) and measured
+    again natively, as the shader multiplies and adds: 0.00 pixels between
+    neighbouring vertices at 1,000 and 5,000 km, at zoom 20 and 20.4. At
+    zoom 20 a local unit is 256 pixels, which the base multiplies by
+    exactly, so the phase is off by 0.00; at 20.4 the scale rounds, off by
+    0.99 at 1,000 km and 0.35 at 5,000, the same at every vertex of the
+    run, so a jump of about that where it meets the next tile's run.
+    Chrome's WebGL2 not run yet.
   - /Patterns/: a hatch over a flat fill (two palettes), anchored to the map
     while panning, with no seam at tile edges or at the repeat, at z2 and
     z14.
@@ -777,4 +809,5 @@ Ruled out:
   bytes with and without shared borders matched (§ OPEN QUESTIONS 9).
   Measured 2026-11-23, release, the counties' tiles at z10: feeding 0.3
   ms, matching (=MeshBuilder::finish=) 0.1 ms; 716 outline segments, 194
-  paired; the partner's 8 bytes a segment are 5 KB of the segments' 25 KB.
+  paired; the partner's 8 bytes a segment are 5 KB of the segments' 25 KB,
+  of 27 KB with the run's base (40 bytes a segment).
