@@ -12,6 +12,7 @@ The v1 slice is built.
 - [ ] [[file:gl-context.org][gl-context.org]] -- a nazca-owned GL context
   type, step 1 built as custom-symbols' step 0; ships with 0.3.0.
 - [ ] [[file:custom-symbols.org][custom-symbols.org]] -- markers, dashes and
-  pattern fills, steps 0 to 6 for 0.3.0, steps 0 to 2 built, step 3
-  next (reviewed, shared borders drawn once); vector symbols (step 7)
+  pattern fills, steps 0 to 6 for 0.3.0, steps 0 to 3 built; next, two
+  additions to step 3 (a far line start's jitter, a function measuring a
+  line as nazca does; ../HANDOFF.org), then step 4; vector symbols (step 7)
   later.

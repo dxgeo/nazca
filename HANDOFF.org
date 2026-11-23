@@ -1,0 +1,88 @@
+#+TITLE: Handoff
+#+AUTHOR: Daniel Okuniewicz Jr.
+
+* Handoff
+Written 2026-11-23, on the =custom-symbols= branch. What is open lives in
+[[file:plans/todo.org][plans/todo.org]], and why each piece is shaped the way it is lives in
+[[file:plans/custom-symbols.org][plans/custom-symbols.org]], the plan this branch builds for 0.3.0.
+
+** WHERE IT STANDS
+Custom symbols' steps 0 to 3 are built and committed on =custom-symbols=,
+unreleased:
+
+- *Step 0*: nazca's own =gl::Context=.
+- *Step 1*: symbols, the atlas and the 256 x 7 palette.
+- *Step 2*: markers, on screen, in picks and in SVG from pixels. Their SVG
+  markup moved to step 5 (§ OPEN QUESTIONS 8).
+- *Step 3* (=eac3ba6=): dashes, and a border two polygons share drawn once,
+  by the last feature fed that outlines it (§ OPEN QUESTIONS 9). Checked
+  natively and in Chrome's WebGL2 by the spike's dash check
+  (=--check-dashes=, X in the browser), which fails as expected with each
+  part of the line shader broken on purpose. § CHECKS has the run and its
+  measurements.
+
+** NEXT SESSION: TWO ADDITIONS TO STEP 3, BEFORE STEP 4
+Both decided 2026-11-23 (user decision), from measurements the dash check
+reports. The plan's § CHECKS records them under /A far line start/ and
+/Dashes/.
+
+*** 1. Cure the far line start's jitter
+A line's distances are stored as =f32= in local units and multiplied by the
+pixels per unit in =f32= in =LINE_VS=, so the dash phase loses precision far
+along a line. Measured at z20, as the shader multiplies:
+
+| Along the line | Phase off by up to | Between neighbouring vertices |
+|----------------+--------------------+-------------------------------|
+| 1,000 km       | 0.50 px            | 0.84 px                       |
+| 5,000 km       | 2.00 px            | 3.16 px                       |
+
+Two =f32= for the distance won't cure it: the product with the scale loses
+as much again. The cure the plan names is a base that a run of segments
+shares, plus each segment's offset from it (=SEGMENT_BYTES= 36 to 40). The
+run then carries one error, a jump at its seam, with no jitter between its
+vertices. To decide when building it: where the base lives in =Mesh= (a run
+per line or ring, or per clipped run), and how the shader reduces the
+base's product modulo the pattern before adding the offset's. Rerun
+=--check-dashes= and compare the jitter it reports with the table above.
+
+*** 2. A function that measures a line as nazca does
+=MeshBuilder::set_line_start= takes where a piece of a longer line starts.
+A start the embedder measures along its own geometry misses nazca's
+measure, which runs along the line as snapped and decimated on the tile
+level's grid. A 20 km line wiggling 5 m every 10 m missed by 12 to 181 px at
+z8 to z18, both ways: snapping drops some wiggles and lengthens others. The
+fixture's simplified coastlines miss by under 1 px.
+
+The grid is fixed in map units for a level, the same for every tile, so a
+function can measure a line exactly as any tile at that level would. An
+embedder that measures each piece with it gets starts whose seams join
+exactly. Things to settle when adding it:
+
+- its home and signature (on =TileGrid= or =Detail=, taking the level, or
+  on =MeshBuilder=);
+- that it snaps and decimates as =MeshBuilder::points= does, from the
+  piece's own start;
+- a unit test that a line cut into pieces, the second started from the
+  measured length of the first, gives the same distances as the line whole;
+- the dash check's seam line rerun with measured starts, expecting jumps of
+  0, next to the source-measured ones;
+- the =set_line_start= docs and the plan's § Dashes pointing at it.
+
+** ALSO OPEN
+- *The crawl check hasn't run.* § CHECKS asks that dashes don't crawl as
+  the map pans.
+- *Darker dots at a translucent line's vertices.* Each segment's round end
+  overlaps the next one's, so the line blends twice there. This is a known
+  limit, in plans/rendering.org § BACKENDS, from before this branch and
+  separate from step 3.
+- *Step 4, pattern fills*, comes after the two additions above, then steps
+  5 and 6 and the 0.3.0 release.
+
+** RUNNING THINGS
+- Native: =cargo run --release --features gl --example spike=. Add
+  =-- --outlines dashed= to start dashed. D cycles the outlines, H hovers
+  the county picked last, and =--check-dashes= runs the check and exits.
+- Browser: =cd spike-web && wasm-pack build --target web --release=, then
+  =python3 -m http.server= there and open the page. X runs the dash check
+  and logs its report to the console.
+- Tests: =cargo test --all-features=.
