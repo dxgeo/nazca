@@ -253,7 +253,8 @@ dash and a pattern, each naming a symbol by id from a =Symbols= atlas
 (=src/symbol.rs=), and is =#[non_exhaustive]=: an embedder builds one from
 =Style::default()= and assigns. The palette texture is 256 x 7. The design
 and what draws them is plans/custom-symbols.org: markers draw (step 2,
-2026-11-21) and dashes (step 3, 2026-11-23); pattern fills are to come.
+2026-11-21), and so do dashes (step 3, 2026-11-23) and pattern fills
+(step 4, 2026-11-24).
 
 /Zoom-dependent values, 2026-10-30:/ a =circle-radius= can follow
 =["interpolate", ["linear"], ["zoom"], 3, 1, 10, 5]=. =style::interpolate(stops,

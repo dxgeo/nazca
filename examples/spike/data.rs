@@ -1,13 +1,13 @@
 //! What both spikes draw -- the native one (`main.rs`) and the browser one
 //! (`spike-web/`, which includes this file): the Massachusetts counties from
 //! nazca's WKB fixture, projected to Web Mercator and prepared tile by tile
-//! as the camera asks for them, a marker at each county's centre, and a
-//! raster laid over them.
+//! as the camera asks for them, a marker at each county's centre, a hatch
+//! or stipple over some of them, and a raster laid over them.
 
 use nazca::grid::{Rect, TileFrame};
 use nazca::raster::{Band, Raster, RasterMesh};
 use nazca::symbol::Kind;
-use nazca::{Align, Colormap, Dash, Detail, Marker, Mesh, MeshBuilder, Palette, Sink, Style, Symbol, SymbolId, Symbols, TileGrid, TileId, wkb};
+use nazca::{Align, Colormap, Dash, Detail, Marker, Mesh, MeshBuilder, Palette, Pattern, Sink, Style, Symbol, SymbolId, Symbols, TileGrid, TileId, wkb};
 
 /// Added to a county's index for its marker's feature id, so a pick tells a
 /// marker from the county under it.
@@ -193,15 +193,24 @@ impl Markers {
     }
 }
 
-/// The markers' symbols, drawn by [`rasterize`] as an embedder's own
-/// rasterizer would hand them in: larger than they are drawn, transparent
-/// pixels black.
+/// The markers' and patterns' symbols, drawn by [`rasterize`] as an
+/// embedder's own rasterizer would hand them in: larger than they are
+/// drawn, transparent pixels black. The pattern check's own two are opaque
+/// squares of 16: white, and four coloured quarters.
 pub struct Icons {
     pub symbols: Symbols,
     badge: SymbolId,
     arrow: SymbolId,
     pin: SymbolId,
+    pub hatch: SymbolId,
+    stipple: SymbolId,
+    pub solid: SymbolId,
+    pub quarters: SymbolId,
 }
+
+/// The pattern check's quarters: top left, top right, bottom left, bottom
+/// right.
+pub const QUARTERS: [[u8; 3]; 4] = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]];
 
 /// The pin's height in its image, and its tip's distance from the top.
 const PIN: (u32, f64) = (48, 46.5);
@@ -228,12 +237,30 @@ pub fn icons() -> Icons {
     let mut pin = Symbol::new(32, PIN.0, pin).unwrap();
     pin.kind = Kind::Mask;
     pin.anchor = [0.5, (PIN.1 / PIN.0 as f64) as f32];
-    Icons {
-        badge: symbols.add(Symbol::new(64, 64, badge).unwrap()).unwrap(),
-        arrow: symbols.add(Symbol::new(64, 64, arrow).unwrap()).unwrap(),
-        pin: symbols.add(pin).unwrap(),
-        symbols,
-    }
+    // A diagonal line, rising to the right, that meets its neighbours'
+    // across every edge, so the repeats tile.
+    let hatch = rasterize(32, 32, |x, y| {
+        let m = (x + y).rem_euclid(32.0);
+        (m.min(32.0 - m) / std::f64::consts::SQRT_2 < 3.0).then_some([255, 255, 255])
+    });
+    let mut hatch = Symbol::new(32, 32, hatch).unwrap();
+    hatch.kind = Kind::Mask;
+    // Two dots, a green and a brown, offset as a stipple's are.
+    let stipple = rasterize(32, 32, |x, y| {
+        let dot = |cx: f64, cy: f64| (x - cx).hypot(y - cy) < 5.0;
+        if dot(8.0, 8.0) { Some([40, 110, 60]) } else if dot(24.0, 24.0) { Some([140, 90, 40]) } else { None }
+    });
+    let solid = rasterize(16, 16, |_, _| Some([255, 255, 255]));
+    let quarters = rasterize(16, 16, |x, y| Some(QUARTERS[(x >= 8.0) as usize + 2 * (y >= 8.0) as usize]));
+    let mut add = |pixels: Symbol| symbols.add(pixels).unwrap();
+    let badge = add(Symbol::new(64, 64, badge).unwrap());
+    let arrow = add(Symbol::new(64, 64, arrow).unwrap());
+    let pin = add(pin);
+    let hatch = add(hatch);
+    let stipple = add(Symbol::new(32, 32, stipple).unwrap());
+    let solid = add(Symbol::new(16, 16, solid).unwrap());
+    let quarters = add(Symbol::new(16, 16, quarters).unwrap());
+    Icons { symbols, badge, arrow, pin, hatch, stipple, solid, quarters }
 }
 
 /// RGBA8 pixels of `w` x `h`, from `paint`'s colour at a position, or none,
@@ -323,6 +350,51 @@ impl Outlines {
             Outlines::Solid | Outlines::Translucent => None,
         }
     }
+}
+
+/// What lies over the counties, a layer of its own drawn from their tiles
+/// again: a pattern over the flat fills beneath, in a palette of its own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Patterns {
+    None,
+    /// A mask hatch, a dark translucent blue, over every other county.
+    Hatch,
+    /// A colour stipple over the others.
+    Stipple,
+}
+
+impl Patterns {
+    pub fn next(self) -> Patterns {
+        match self {
+            Patterns::None => Patterns::Hatch,
+            Patterns::Hatch => Patterns::Stipple,
+            Patterns::Stipple => Patterns::None,
+        }
+    }
+}
+
+/// The patterns' layer: a hatch or a stipple in some of the counties'
+/// classes, and nothing in the rest.
+pub fn hatching(patterns: Patterns, icons: &Icons) -> Palette {
+    let mut p = Palette::new();
+    let (symbol, repeat, fill, classes) = match patterns {
+        Patterns::None => return p,
+        Patterns::Hatch => (icons.hatch, 12.0, [0.1, 0.2, 0.5, 0.6], [1, 3, 5]),
+        Patterns::Stipple => (icons.stipple, 16.0, [1.0; 4], [2, 4, 6]),
+    };
+    for class in classes {
+        p.set(class, pattern(symbol, repeat, fill));
+    }
+    p
+}
+
+/// A fill of `symbol` repeated every `repeat` pixels, tinted or faded by
+/// `fill`.
+pub fn pattern(symbol: SymbolId, repeat: f32, fill: [f32; 4]) -> Style {
+    let mut style = Style::default();
+    style.fill = fill;
+    style.pattern = Some(Pattern::new(symbol, repeat));
+    style
 }
 
 /// The pin's sizes. Checked against half of the default 32-pixel guard band

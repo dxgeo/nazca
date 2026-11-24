@@ -14,7 +14,17 @@
 //! and the bound framebuffer.
 //!
 //! - *Fills* are the mesh's triangles, coloured by a [`Palette`] held as a
-//!   lookup texture, so restyling uploads one small texture.
+//!   lookup texture, so restyling uploads one small texture. A class with a
+//!   [`crate::Pattern`] samples its symbol instead, repeated from the map's
+//!   origin. The repeat is found from the fragment's pixel on screen, not
+//!   the tile's coordinates, so tiles meet without a seam and a stand-in
+//!   ancestor, whose coordinates are coarse at a deep zoom, draws it as
+//!   finely; where the screen's centre lies in a class's repeat is reduced
+//!   in `f64` for each draw, from the camera. The mipmap is picked from the
+//!   unwrapped coordinate, and a sample is kept to the middle of the
+//!   symbol's edge texels, so neither the wrap nor the atlas's padding
+//!   leaves a line at a repeat's edge. Picking ignores the pattern: a fill
+//!   picks wherever it covers.
 //! - *Lines* are uploaded as centerline segments and expanded in the vertex
 //!   shader: each segment is one instanced quad around it, and the fragment
 //!   shader keeps what lies within half the width of the segment, with a
@@ -72,7 +82,7 @@ use crate::camera::Camera;
 use crate::grid::TileFrame;
 use crate::prepare::Mesh;
 use crate::raster::{Band, Raster, RasterMesh};
-use crate::style::{Align, CLASSES, Colormap, DASH_LENGTHS, Palette, Style};
+use crate::style::{Align, CLASSES, Colormap, DASH_LENGTHS, Palette, Pattern, Style, pattern_phase};
 use crate::symbol::{Kind, PADDING, SymbolId, Symbols};
 use glow::HasContext;
 use std::collections::HashMap;
@@ -141,9 +151,56 @@ void main() {
 }
 #else
 uniform highp sampler2D u_palette;
+uniform highp sampler2D u_table;
+uniform highp sampler2D u_atlas;
+uniform vec2 u_viewport;
+uniform vec2 u_turn;
+uniform vec4 u_phase[128];
 out vec4 o_color;
 void main() {
-    o_color = texelFetch(u_palette, ivec2(v_class, 0), 0);
+    vec4 fill = texelFetch(u_palette, ivec2(v_class, 0), 0);
+    vec4 pattern = texelFetch(u_palette, ivec2(v_class, 6), 0);
+    int id = int(pattern.x + 0.5) - 1;
+    if (id < 0) {
+        o_color = fill;
+        return;
+    }
+    // The symbol's rectangle in the atlas and its kind, as for a marker.
+    vec4 rect = vec4(0.0);
+    float mask = 0.0;
+    if (id / 256 < textureSize(u_table, 0).y) {
+        ivec2 at = ivec2(2 * (id % 256), id / 256);
+        rect = texelFetch(u_table, at, 0);
+        mask = texelFetch(u_table, at + ivec2(1, 0), 0).z;
+    }
+    if (rect.z <= 0.0 || !(pattern.y > 0.0)) discard;
+    vec2 cell = rect.zw * (pattern.y / max(rect.z, rect.w));
+    vec4 pair = u_phase[v_class / 2];
+    vec2 phase = v_class % 2 == 0 ? pair.xy : pair.zw;
+    // The fragment's pixels from the viewport's centre, Y up, turned onto
+    // the map's axes, from the centre's place in its repeat: the pattern
+    // depends on no tile's coordinates, so tiles meet without a seam.
+    vec2 v = gl_FragCoord.xy - 0.5 * u_viewport;
+    vec2 q = phase + vec2(u_turn.x * v.x + u_turn.y * v.y, u_turn.x * v.y - u_turn.y * v.x);
+    // In repeats, Y down as the image's rows run. The gradient is this
+    // unwrapped coordinate's, worked out rather than taken by dFdx, which
+    // the branches above leave undefined; the wrapped one jumps at each
+    // repeat's edge and would pick the smallest mipmap along it.
+    vec2 w = vec2(q.x, -q.y) / cell;
+    vec2 size = vec2(textureSize(u_atlas, 0));
+    vec2 dx = vec2(u_turn.x, u_turn.y) / cell * rect.zw / size;
+    vec2 dy = vec2(u_turn.y, -u_turn.x) / cell * rect.zw / size;
+    // Clamped to the middle of the edge texels of the coarser of the two
+    // levels the gradient blends, so a repeat's edge takes nothing from the
+    // padding around it.
+    float lod = clamp(log2(max(rect.z, rect.w) / pattern.y), 0.0, 2.0);
+    vec2 inset = min(vec2(0.5 * exp2(ceil(lod))), 0.5 * rect.zw);
+    vec2 uv = clamp(rect.xy + fract(w) * rect.zw, rect.xy + inset, rect.xy + rect.zw - inset);
+    vec4 t = textureGrad(u_atlas, uv / size, dx, dy);
+    vec3 rgb = mask > 0.5 ? fill.rgb : (t.a > 0.0 ? t.rgb / t.a : vec3(0.0));
+    float a = t.a * fill.a;
+    if (a <= 0.0) discard;
+    o_color = vec4(rgb, a);
 }
 #endif
 "#;
@@ -654,17 +711,22 @@ pub struct GpuRaster {
 
 /// A [`Palette`] as a lookup texture: 256 x 7 RGBA32F, a column per class,
 /// rows fill colour, line colour, line width and point size, marker, two of
-/// dash lengths, and pattern (`palette_texels`).
+/// dash lengths, and pattern (`palette_texels`). The classes with a pattern
+/// are kept on the CPU too, to place their repeats for each draw.
 pub struct GpuPalette {
     texture: glow::Texture,
+    patterns: Vec<(u8, Pattern)>,
 }
 
 /// [`Symbols`] on the GPU, held by the [`Renderer`]: the atlas as an RGBA8
 /// texture mipmapped to level 2, and an RGBA32F table, 512 wide, of two
 /// texels an id: its rectangle in atlas pixels, then its anchor and kind.
+/// Each id's width and height are kept on the CPU too, by id, 0 for an id
+/// not held, to size a pattern's repeat.
 struct GpuSymbols {
     atlas: glow::Texture,
     table: glow::Texture,
+    sizes: Vec<[u32; 2]>,
     bytes: usize,
 }
 
@@ -760,7 +822,11 @@ impl GpuSymbols {
             // Level 0 and the two mipmaps below it, then the table.
             let texels = (side * side) as usize;
             let bytes = 4 * (texels + texels / 4 + texels / 16) + 2 * SYMBOL_ROW * rows * 16;
-            Ok(GpuSymbols { atlas, table, bytes })
+            let mut sizes = vec![[0; 2]; symbols.iter().last().map_or(0, |(id, _, _)| id.0 as usize + 1)];
+            for (id, symbol, _) in symbols.iter() {
+                sizes[id.0 as usize] = [symbol.width(), symbol.height()];
+            }
+            Ok(GpuSymbols { atlas, table, sizes, bytes })
         }
     }
 
@@ -802,7 +868,7 @@ impl Renderer {
         let pick = format!("{header}#define PICK\n");
         let state = format!("{header}#define STATE\n");
         let pick_state = format!("{header}#define PICK\n#define STATE\n");
-        let fill_u = ["u_matrix", "u_post", "u_palette", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
+        let fill_u = ["u_matrix", "u_post", "u_palette", "u_table", "u_atlas", "u_viewport", "u_turn", "u_phase", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
         let line_u = ["u_matrix", "u_post", "u_viewport", "u_palette", "u_min_half", "u_unit_px", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
         let marker_u = ["u_matrix", "u_post", "u_viewport", "u_palette", "u_table", "u_atlas", "u_min_half", "u_layer", "u_state", "u_state_first", "u_state_count", "u_state_mask"];
         let raster_u = ["u_matrix", "u_post", "u_band", "u_ramp", "u_kind", "u_domain", "u_opacity", "u_has_nodata", "u_nodata"];
@@ -995,12 +1061,13 @@ impl Renderer {
         let gl = &gl.raw;
         // SAFETY: a texture of its own, filled from a local of 256 x 7 texels.
         let texture = unsafe { texture(gl, glow::RGBA32F, CLASSES as i32, PALETTE_ROWS, glow::RGBA, glow::FLOAT, &palette_texels(palette), false)? };
-        Ok(GpuPalette { texture })
+        Ok(GpuPalette { texture, patterns: patterns(palette) })
     }
 
     /// Restyles: rewrites `gpu` from `palette`. No tile is touched.
-    pub fn update_palette(&self, gl: &Context, gpu: &GpuPalette, palette: &Palette) {
+    pub fn update_palette(&self, gl: &Context, gpu: &mut GpuPalette, palette: &Palette) {
         let gl = &gl.raw;
+        gpu.patterns = patterns(palette);
         let texels = palette_texels(palette);
         // SAFETY: rewrites the whole of the palette's own texture, at the
         // size it was made with, from a local.
@@ -1203,6 +1270,10 @@ impl Renderer {
                 gl.active_texture(glow::TEXTURE1);
                 gl.bind_texture(glow::TEXTURE_2D, Some(state.texture));
             }
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.symbols.table));
+            gl.active_texture(glow::TEXTURE3);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.symbols.atlas));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(palette.texture));
 
@@ -1211,8 +1282,18 @@ impl Renderer {
             gl.uniform_matrix_4_f32_slice(fill.u("u_post"), false, &post);
             gl.uniform_1_i32(fill.u("u_palette"), 0);
             state_uniforms(gl, fill);
-            if let Mode::Pick { layer, .. } = mode {
-                gl.uniform_1_u32(fill.u("u_layer"), layer);
+            match mode {
+                Mode::Pick { layer, .. } => gl.uniform_1_u32(fill.u("u_layer"), layer),
+                // Picking ignores patterns: a fill picks wherever it covers.
+                Mode::Screen | Mode::State(_) if !palette.patterns.is_empty() => {
+                    gl.uniform_1_i32(fill.u("u_table"), 2);
+                    gl.uniform_1_i32(fill.u("u_atlas"), 3);
+                    gl.uniform_2_f32(fill.u("u_viewport"), camera.size_px[0] as f32, camera.size_px[1] as f32);
+                    let (s, c) = camera.bearing.sin_cos();
+                    gl.uniform_2_f32(fill.u("u_turn"), c as f32, s as f32);
+                    gl.uniform_4_f32_slice(fill.u("u_phase"), &self.pattern_phases(palette, camera));
+                }
+                Mode::Screen | Mode::State(_) => {}
             }
             gl.bind_vertex_array(Some(mesh.fill_vao));
             gl.draw_elements(glow::TRIANGLES, mesh.fill_count, glow::UNSIGNED_INT, 0);
@@ -1238,11 +1319,6 @@ impl Renderer {
             }
 
             if mesh.point_count > 0 {
-                gl.active_texture(glow::TEXTURE2);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.symbols.table));
-                gl.active_texture(glow::TEXTURE3);
-                gl.bind_texture(glow::TEXTURE_2D, Some(self.symbols.atlas));
-                gl.active_texture(glow::TEXTURE0);
                 gl.use_program(Some(marker.program));
                 gl.uniform_matrix_4_f32_slice(marker.u("u_matrix"), false, &matrix);
                 gl.uniform_matrix_4_f32_slice(marker.u("u_post"), false, &post);
@@ -1263,6 +1339,21 @@ impl Renderer {
             self.settle(gl, &matrix, &post, grow, square);
             gl.bind_vertex_array(None);
         }
+    }
+
+    /// Where the camera's centre lies in each patterned class's repeat, as
+    /// `FILL_FS`'s `u_phase` takes it: two classes a `vec4`, 0 for a class
+    /// that draws no pattern.
+    fn pattern_phases(&self, palette: &GpuPalette, camera: &Camera) -> [f32; 2 * CLASSES] {
+        let mut phases = [0.0; 2 * CLASSES];
+        for &(class, pattern) in &palette.patterns {
+            let size = self.symbols.sizes.get(pattern.symbol.0 as usize).copied().unwrap_or_default();
+            if let Some(cell) = pattern.cell(size) {
+                let [x, y] = pattern_phase(camera, cell);
+                phases[2 * class as usize..][..2].copy_from_slice(&[x as f32, y as f32]);
+            }
+        }
+        phases
     }
 
     /// Marks the unclaimed pixels `footprint` covers as this tile's
@@ -1546,6 +1637,11 @@ fn palette_texel(s: &Style, row: usize) -> [f32; 4] {
             [id, repeat, phase, count]
         }
     }
+}
+
+/// The classes of `palette` with a pattern.
+fn patterns(palette: &Palette) -> Vec<(u8, Pattern)> {
+    palette.styles().iter().enumerate().filter_map(|(class, s)| s.pattern.map(|p| (class as u8, p))).collect()
 }
 
 /// The symbol table's rows and texels: id `n` at column `2 * (n % 256)` of

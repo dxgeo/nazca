@@ -6,7 +6,8 @@
 //! a county and toggle its selection, press H to toggle a hover state on the
 //! county picked last, press F to show every other county, press M to cycle
 //! the markers, press D to cycle the outlines (solid, dashed, dotted,
-//! translucent), and press R to cycle the raster overlay.
+//! translucent), press P to cycle the patterns over the counties (a hatch,
+//! a stipple), and press R to cycle the raster overlay.
 //!
 //!   cargo run -p nazca --features gl --example spike
 //!   cargo run -p nazca --features gl --example spike -- --screenshot out.png
@@ -34,12 +35,14 @@
 //! outlines, as D cycles them. `--check-dashes` checks shared borders and
 //! dashes by reading the framebuffer, measures line starts' seams, the
 //! phase of a line far along it and the cost of matching borders, reports
-//! and exits.
+//! and exits. `--patterns` (`hatch` or `stipple`) opens with that pattern
+//! over the counties, as P cycles them. `--check-patterns` checks pattern
+//! fills by reading the framebuffer, reports and exits.
 
 mod data;
 mod tiles;
 
-use data::{Markers, Outlines, Overlay};
+use data::{Markers, Outlines, Overlay, Patterns};
 use glutin::config::{ConfigTemplateBuilder, GlConfig};
 use glutin::context::{ContextApi, ContextAttributesBuilder, GlProfile, NotCurrentGlContext, PossiblyCurrentContext, Version};
 use glutin::display::{GetGlDisplay, GlDisplay};
@@ -131,6 +134,8 @@ struct Options {
     level: Option<f64>,
     outlines: Outlines,
     check_dashes: bool,
+    patterns: Patterns,
+    check_patterns: bool,
 }
 
 struct App {
@@ -172,6 +177,19 @@ impl App {
                 }
             }
             std::process::exit(0);
+        }
+        if self.options.check_patterns {
+            match tiles::check_patterns(&g.map, &g.gl, &g.renderer, camera.size_px) {
+                Ok(report) => println!("{report}"),
+                Err(e) => {
+                    eprintln!("pattern check failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
+        if self.options.patterns != Patterns::None {
+            g.map.set_patterns(&g.gl, &g.renderer, std::mem::replace(&mut self.options.patterns, Patterns::None));
         }
         if self.options.outlines != Outlines::Solid {
             g.map.set_outlines(&g.gl, &g.renderer, std::mem::replace(&mut self.options.outlines, Outlines::Solid));
@@ -362,6 +380,11 @@ impl ApplicationHandler for App {
                     g.map.set_outlines(&g.gl, &g.renderer, next);
                     println!("outlines: {next:?}");
                 }
+                Key::Character(c) if c.eq_ignore_ascii_case("p") => {
+                    let next = g.map.patterns().next();
+                    g.map.set_patterns(&g.gl, &g.renderer, next);
+                    println!("patterns: {next:?}");
+                }
                 Key::Character(c) if c.eq_ignore_ascii_case("f") => {
                     let on = !g.map.filtered();
                     g.map.set_filter(&g.gl, &g.renderer, on);
@@ -384,7 +407,7 @@ impl ApplicationHandler for App {
 
 fn main() {
     let usage = || -> ! {
-        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state] [--own-gl] [--markers colour|mask] [--check-markers] [--centre NAME] [--level Z] [--outlines dashed|dotted|translucent] [--check-dashes]");
+        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state] [--own-gl] [--markers colour|mask] [--check-markers] [--centre NAME] [--level Z] [--outlines dashed|dotted|translucent] [--check-dashes] [--patterns hatch|stipple] [--check-patterns]");
         std::process::exit(2);
     };
     let mut options = Options {
@@ -404,6 +427,8 @@ fn main() {
         level: None,
         outlines: Outlines::Solid,
         check_dashes: false,
+        patterns: Patterns::None,
+        check_patterns: false,
     };
     let mut args = std::env::args().skip(1);
     let point = |value: &str| -> [f64; 2] {
@@ -432,6 +457,10 @@ fn main() {
             options.check_dashes = true;
             continue;
         }
+        if flag == "--check-patterns" {
+            options.check_patterns = true;
+            continue;
+        }
         let value = args.next().unwrap_or_else(|| usage());
         match flag.as_str() {
             "--screenshot" => options.screenshot = Some(value),
@@ -457,6 +486,13 @@ fn main() {
                     "dashed" => Outlines::Dashed,
                     "dotted" => Outlines::Dotted,
                     "translucent" => Outlines::Translucent,
+                    _ => usage(),
+                }
+            }
+            "--patterns" => {
+                options.patterns = match value.as_str() {
+                    "hatch" => Patterns::Hatch,
+                    "stipple" => Patterns::Stipple,
                     _ => usage(),
                 }
             }

@@ -2,12 +2,12 @@
 #+AUTHOR: Daniel Okuniewicz Jr.
 
 * Handoff
-Written 2026-11-23, on the =custom-symbols= branch. What is open lives in
+Written 2026-11-24, on the =custom-symbols= branch. What is open lives in
 [[file:plans/todo.org][plans/todo.org]], and why each piece is shaped the way it is lives in
 [[file:plans/custom-symbols.org][plans/custom-symbols.org]], the plan this branch builds for 0.3.0.
 
 ** WHERE IT STANDS
-Custom symbols' steps 0 to 3 are built and committed on =custom-symbols=,
+Custom symbols' steps 0 to 4 are built and committed on =custom-symbols=,
 unreleased:
 
 - *Step 0*: nazca's own =gl::Context=.
@@ -29,25 +29,38 @@ unreleased:
     next piece's start joins exactly: 0.0 pixels at every level in the
     dash check, measured by a different tile at the level than the seam's.
 
-§ CHECKS (/Dashes/, /A far line start/) has the runs and numbers.
+- *Step 4*: pattern fills, built 2026-11-24. The repeat comes from the
+  fragment's pixel and the screen centre's place in each class's repeat,
+  reduced in =f64= on the CPU per draw, not from tile coordinates
+  (§ Pattern fills says why). =update_palette= now takes
+  =&mut GpuPalette=. Checked by the spike's pattern check
+  (=--check-patterns=, T in the browser) at z2.3, z14.3 and z20.3, and P
+  or =--patterns= puts a hatch or a stipple over the counties. Views
+  without patterns are byte-identical to step 3's. The same check passes
+  in Chrome's WebGL2.
+
+§ CHECKS (/Dashes/, /A far line start/, /Patterns/) has the runs and
+numbers.
 
 ** NEXT SESSION
-*Step 4, pattern fills*: the anchor uniform, =FILL_FS='s pattern sample
-with =textureGrad=, =<pattern>= in SVG. § Pattern fills and its § CHECKS
-entry have the design.
+- *Step 5*: =Symbol::from_svg= behind the =symbols= feature, and the SVG
+  writer's =<defs>= writing its markup (§ OPEN QUESTIONS 8, § SVG output,
+  § CHECKS /Markup/).
 
 ** ALSO OPEN
 - *Darker dots at a translucent line's vertices.* Each segment's round end
   overlaps the next one's, so the line blends twice there. This is a known
   limit, in plans/rendering.org § BACKENDS, from before this branch and
   separate from step 3.
-- After step 4: steps 5 and 6 and the 0.3.0 release.
+- After step 5: step 6 and the 0.3.0 release, whose notes cover the
+  =update_palette= change with the two breaks.
 
 ** RUNNING THINGS
 - Native: =cargo run --release --features gl --example spike=. Add
-  =-- --outlines dashed= to start dashed. D cycles the outlines, H hovers
-  the county picked last, and =--check-dashes= runs the check and exits.
+  =-- --outlines dashed= to start dashed. D cycles the outlines, P the
+  patterns, H hovers the county picked last, and =--check-dashes= and
+  =--check-patterns= run their checks and exit.
 - Browser: =cd spike-web && wasm-pack build --target web --release=, then
   =python3 -m http.server= there and open the page. X runs the dash check
-  and logs its report to the console.
+  and T the pattern check, each logging its report to the console.
 - Tests: =cargo test --all-features=.

@@ -7,6 +7,14 @@
 //! - *Fills* are the mesh's polygon rings (`Mesh::rings`, `Mesh::polygons`),
 //!   not the triangles, which would show their seams once antialiased and
 //!   cost more.
+//! - *Patterns* are a `<pattern>` for each class and layer that fills with
+//!   one, named by the class's `fill`, in user space: repeats of the
+//!   symbol's box laid along the map's axes from the map's origin, as on
+//!   screen, the one written being the repeat that holds the camera's
+//!   centre, so its numbers stay small far from the origin. It holds a
+//!   `<use>` of the symbol, or for a mask a `<rect>` of the class's fill
+//!   through its `<mask>`. It is placed by the camera of the first draw
+//!   that uses it, as the same camera draws every layer of a page.
 //! - *Lines* are the mesh's outline segments, chained back into polylines.
 //!   These are exactly the segments the GPU draws, so edges that clipping
 //!   made are not stroked here either, and lines draw over every fill of
@@ -23,8 +31,8 @@
 //! - *Points* are `<circle>`s of the class's point size, in its fill colour,
 //!   or, where the class has a [`crate::Marker`], its symbol: a `<use>` of
 //!   it placed, sized and turned as on screen, or for a mask a `<rect>` of
-//!   the class's fill through a `<mask>` of it. Each symbol a marker uses is
-//!   written once, in `<defs>`, from the [`Symbols`] given to
+//!   the class's fill through a `<mask>` of it. Each symbol a marker or a
+//!   pattern uses is written once, in `<defs>`, from the [`Symbols`] given to
 //!   [`SvgWriter::symbols`]: as a PNG of its pixels, stored uncompressed by
 //!   a small encoder here. A mask's PNG is white where it is opaque, so a
 //!   viewer reading the mask by luminance, without `mask-type: alpha`, sees
@@ -64,7 +72,7 @@
 
 use crate::camera::Camera;
 use crate::prepare::Mesh;
-use crate::style::{Align, Palette, Style};
+use crate::style::{Align, Palette, Style, pattern_phase};
 use crate::symbol::{Kind, Symbol, Symbols};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -85,9 +93,12 @@ pub struct SvgWriter {
     /// each one's `stroke-dashoffset` and path data.
     runs: BTreeMap<u8, Vec<(f64, String)>>,
     points: String,
-    /// The symbols markers draw, by id, and the ids a marker has used.
+    /// The symbols markers and patterns draw, by id, and the ids one has
+    /// used.
     symbols: BTreeMap<u16, Symbol>,
     used: BTreeSet<u16>,
+    /// The `<pattern>` elements fills use, by id.
+    patterns: BTreeMap<String, String>,
 }
 
 impl SvgWriter {
@@ -106,13 +117,14 @@ impl SvgWriter {
             points: String::new(),
             symbols: BTreeMap::new(),
             used: BTreeSet::new(),
+            patterns: BTreeMap::new(),
         }
     }
 
-    /// The symbols markers draw from, in place of any given before. Each one
-    /// a marker uses is written once, in `<defs>`. Give them before drawing
-    /// the layers that use them; a marker whose symbol isn't here draws
-    /// nothing, as on screen.
+    /// The symbols markers and patterns draw from, in place of any given
+    /// before. Each one used is written once, in `<defs>`. Give them before
+    /// drawing the layers that use them; a marker or pattern whose symbol
+    /// isn't here draws nothing, as on screen.
     pub fn symbols(&mut self, symbols: &Symbols) {
         self.symbols = symbols.iter().map(|(id, s, _)| (id.0, s.clone())).collect();
     }
@@ -182,7 +194,26 @@ impl SvgWriter {
                 continue;
             }
             let name = format!("f{layer}-{class}");
-            self.styles.entry(name).or_insert_with(|| format!("fill:{};stroke:none;fill-rule:nonzero", paint(style.fill)));
+            let fill = match style.pattern {
+                None => paint(style.fill),
+                Some(pattern) => {
+                    let Some(symbol) = self.symbols.get(&pattern.symbol.0) else { continue };
+                    let Some(cell) = pattern.cell([symbol.width(), symbol.height()]) else { continue };
+                    let id = format!("pat{layer}-{class}");
+                    if !self.patterns.contains_key(&id) {
+                        self.used.insert(pattern.symbol.0);
+                        let element = pattern_element(&id, symbol, pattern.symbol.0, cell, camera, style.fill, &format!("t{layer}-{class}"), &mut self.styles);
+                        self.patterns.insert(id.clone(), element);
+                    }
+                    // A colour pattern's alpha is multiplied by the fill's; a
+                    // mask's tint carries the fill's own.
+                    match symbol.kind {
+                        Kind::Colour if style.fill[3] < 1.0 => format!("url(#{id});opacity:{}", num(style.fill[3] as f64)),
+                        _ => format!("url(#{id})"),
+                    }
+                }
+            };
+            self.styles.entry(name).or_insert_with(|| format!("fill:{fill};stroke:none;fill-rule:nonzero"));
             let d = self.fills.entry(class).or_default();
             for (k, r) in rings.iter().enumerate() {
                 ring.clear();
@@ -332,6 +363,9 @@ impl SvgWriter {
                     let _ = writeln!(out, r##"<mask id="mask{id}" style="mask-type:alpha"><use href="#sym{id}"/></mask>"##);
                 }
             }
+            for element in self.patterns.values() {
+                out.push_str(element);
+            }
             out.push_str("</defs>\n");
         }
         if let Some(bg) = self.background {
@@ -341,6 +375,34 @@ impl SvgWriter {
         out.push_str("</svg>\n");
         out
     }
+}
+
+/// A fill's `<pattern>` of `symbol` (id `sid`), in repeats of `cell` pixels
+/// laid as on screen: along the map's axes from the map's origin, the one
+/// written being the repeat that holds the camera's centre, so its
+/// coordinates stay small however far the view is from the origin. A mask
+/// is the class's fill colour through it, styled as CSS class `tint`.
+#[allow(clippy::too_many_arguments)]
+fn pattern_element(id: &str, symbol: &Symbol, sid: u16, cell: [f64; 2], camera: &Camera, fill: [f32; 4], tint: &str, styles: &mut BTreeMap<String, String>) -> String {
+    let (w, h) = (symbol.width(), symbol.height());
+    let phase = pattern_phase(camera, cell);
+    let corner: [f64; 2] = std::array::from_fn(|i| camera.center[i] - phase[i] * camera.units_per_px);
+    // The repeat's top left corner: the map's axes turned as on screen,
+    // and the image's rows running south.
+    let [x, y] = camera.map_to_screen([corner[0], corner[1] + cell[1] * camera.units_per_px]);
+    let mut transform = format!("translate({},{})", num(x), num(y));
+    let turn = -camera.bearing.to_degrees();
+    if turn.rem_euclid(360.0) != 0.0 {
+        let _ = write!(transform, " rotate({})", fine(turn));
+    }
+    let _ = write!(transform, " scale({})", fine(cell[0] / w as f64));
+    let content = if symbol.kind == Kind::Mask {
+        styles.entry(tint.to_string()).or_insert_with(|| format!("fill:{};stroke:none", paint(fill)));
+        format!(r#"<rect class="{tint}" width="{w}" height="{h}" mask="url(#mask{sid})"/>"#)
+    } else {
+        format!(r##"<use href="#sym{sid}"/>"##)
+    };
+    format!("<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"{w}\" height=\"{h}\" patternTransform=\"{transform}\">{content}</pattern>\n")
 }
 
 /// A polyline of outline segments being written: its class, the vertex it
@@ -503,8 +565,9 @@ fn num(v: f64) -> String {
     s
 }
 
-/// A scale to a millionth, without trailing zeros: a hundredth of a 48-pixel
-/// image's scale would move its far edge by half a pixel.
+/// A scale or an angle to a millionth, without trailing zeros: a hundredth
+/// of a 48-pixel image's scale would move its far edge by half a pixel, and
+/// a hundredth of a degree a pattern's repeats a viewport away by a fifth.
 fn fine(v: f64) -> String {
     let s = format!("{v:.6}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
@@ -824,6 +887,85 @@ mod tests {
         svg.begin_layer();
         svg.draw(&mesh, &cam, &marker_palette(colour, pin));
         assert!(!svg.finish().contains("<use"));
+    }
+
+    /// A square of each of `classes` around the camera's centre, `half`
+    /// map units across.
+    fn squares(cam: &Camera, classes: &[u8], half: f64) -> Mesh {
+        let mut b = MeshBuilder::for_view(cam);
+        let [x, y] = cam.center;
+        for &class in classes {
+            b.set_class(class);
+            b.begin_polygon();
+            b.begin_ring();
+            b.points(&[[x - half, y - half], [x + half, y - half], [x + half, y + half], [x - half, y + half], [x - half, y - half]]);
+            b.end_ring();
+            b.end_polygon();
+        }
+        b.finish()
+    }
+
+    fn write_patterns(cam: &Camera, palette: &Palette, symbols: Option<&Symbols>) -> String {
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        if let Some(symbols) = symbols {
+            svg.symbols(symbols);
+        }
+        svg.begin_layer();
+        let mesh = squares(cam, &[1, 2, 3], 20.0 * cam.units_per_px);
+        svg.draw(&mesh, cam, palette);
+        // A second draw, as of another tile, writes each pattern once.
+        svg.draw(&mesh, cam, palette);
+        svg.finish()
+    }
+
+    #[test]
+    fn a_pattern_is_its_symbol_repeated_from_the_map_origin() {
+        use crate::style::Pattern;
+        let (symbols, colour, pin) = symbols();
+        let mut p = Palette::new();
+        p.set(1, Style { fill: [0.0, 0.0, 1.0, 1.0], pattern: Some(Pattern::new(colour, 8.0)), ..Style::default() });
+        // The camera's centre 3 and 1 pixels east and north of a repeat's
+        // south-west corner: the repeat's top left at (97, 47).
+        let cam = Camera::new([1003.0, 2005.0], 1.0, [200, 100]);
+        let out = write_patterns(&cam, &p, Some(&symbols));
+        assert!(out.contains(r##"<pattern id="pat1-1" patternUnits="userSpaceOnUse" width="4" height="2" patternTransform="translate(97,47) scale(2)"><use href="#sym0"/></pattern>"##), "{out}");
+        assert!(out.contains(".f1-1{fill:url(#pat1-1);stroke:none;fill-rule:nonzero}"), "{out}");
+        assert_eq!((out.matches("<pattern ").count(), out.matches("<image id=\"sym0\"").count()), (1, 1), "{out}");
+
+        // A mask takes the fill's colour, and a translucent colour pattern
+        // the fill's alpha; far from the origin, turned, at street level.
+        p.set(2, Style { fill: [1.0, 0.0, 0.0, 0.5], pattern: Some(Pattern::new(pin, 8.0)), ..Style::default() });
+        p.set(3, Style { fill: [0.0, 0.0, 1.0, 0.25], pattern: Some(Pattern::new(colour, 8.0)), ..Style::default() });
+        let mut cam = Camera::new([20_000_000.3, -3_000_000.9], 0.1, [200, 100]);
+        cam.bearing = 0.4;
+        let out = write_patterns(&cam, &p, Some(&symbols));
+        assert!(out.contains(r#"<rect class="t1-2" width="2" height="4" mask="url(#mask1)"/></pattern>"#), "{out}");
+        assert!(out.contains(".t1-2{fill:#ff0000;opacity:0.5;stroke:none}"), "{out}");
+        assert!(out.contains(".f1-2{fill:url(#pat1-2);stroke:none;fill-rule:nonzero}"), "{out}");
+        assert!(out.contains(".f1-3{fill:url(#pat1-3);opacity:0.25;stroke:none;fill-rule:nonzero}"), "{out}");
+        assert!(out.contains(r#"<mask id="mask1""#), "{out}");
+        // Each repeat's top left corner is on the screen near the centre,
+        // and is a map point a whole number of repeats from the origin.
+        for (id, cell) in [("pat1-2", [4.0, 8.0]), ("pat1-3", [8.0, 4.0])] {
+            let at = out.find(&format!(r#"<pattern id="{id}""#)).unwrap();
+            let transform = &out[at..].split("patternTransform=\"translate(").nth(1).unwrap();
+            let (xy, rest) = transform.split_once(')').unwrap();
+            assert!(rest.starts_with(" rotate(-22.918312) scale(2)"), "{rest}");
+            let [x, y]: [f64; 2] = xy.split(',').map(|v| v.parse().unwrap()).collect::<Vec<_>>().try_into().unwrap();
+            assert!(x.abs() < 300.0 && y.abs() < 300.0, "{id}: {x}, {y}");
+            let m = cam.screen_to_map([x, y]);
+            for i in 0..2 {
+                let into = (m[i] / cam.units_per_px).rem_euclid(cell[i]);
+                assert!(into.min(cell[i] - into) < 0.01, "{id}: {into} into a repeat of {}", cell[i]);
+            }
+        }
+
+        // A symbol not given, or a repeat that isn't positive, draws nothing.
+        assert!(!write_patterns(&cam, &p, None).contains("<path"));
+        p.set(1, Style { fill: [0.0, 0.0, 1.0, 1.0], pattern: Some(Pattern::new(colour, 0.0)), ..Style::default() });
+        p.set(2, Style::default());
+        p.set(3, Style::default());
+        assert!(!write_patterns(&cam, &p, Some(&symbols)).contains("<path"));
     }
 
     #[test]

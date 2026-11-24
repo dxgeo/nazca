@@ -1,7 +1,8 @@
 //! The frame loop both spikes share: select the tiles the camera needs, plan
 //! them against the cache, prepare and upload what is missing, and draw --
-//! the counties and their markers as one layer, the chosen ones over them,
-//! an optional raster overlay as the next -- and pick the county or marker
+//! the counties and their markers as one layer, an optional hatch or
+//! stipple over them, the chosen ones over that, an optional raster overlay
+//! as the next -- and pick the county or marker
 //! under a pixel. A filter shows
 //! every other county, by drawing and picking the layer only through a
 //! state; [`TiledMap::svg`] writes the same view through the same states.
@@ -10,7 +11,7 @@
 //! cache before the frame draws and no stand-in is ever shown. A real
 //! embedder fetches asynchronously and draws whatever the plan says now.
 
-use crate::data::{self, Counties, Icons, MARKER_BASE, Markers, Outlines, Overlay};
+use crate::data::{self, Counties, Icons, MARKER_BASE, Markers, Outlines, Overlay, Patterns, QUARTERS};
 use nazca::gl::{Context, GpuColormap, GpuMesh, GpuPalette, GpuRaster, GpuState, Pick, Picker, Renderer};
 use nazca::grid::{Rect, TileFrame};
 use nazca::svg::SvgWriter;
@@ -63,6 +64,8 @@ pub struct TiledMap {
     icons: Icons,
     markers: Markers,
     outlines: Outlines,
+    patterns: Patterns,
+    hatching: GpuPalette,
 }
 
 /// What the last frame did.
@@ -98,9 +101,11 @@ impl TiledMap {
             picker: Picker::new(gl).unwrap(),
             overlay: Overlay::None,
             raster: None,
+            hatching: renderer.palette(gl, &data::hatching(Patterns::None, &icons)).unwrap(),
             icons,
             markers: Markers::None,
             outlines: Outlines::Solid,
+            patterns: Patterns::None,
         };
         map.set_overlay(gl, renderer, overlay);
         map
@@ -145,7 +150,7 @@ impl TiledMap {
     pub fn set_markers(&mut self, gl: &Context, renderer: &Renderer, markers: Markers) {
         let palette = data::palette(markers, self.outlines, &self.icons);
         palette.check_reach(&self.icons.symbols, Detail::default().guard_px).unwrap();
-        renderer.update_palette(gl, &self.palette, &palette);
+        renderer.update_palette(gl, &mut self.palette, &palette);
         self.markers = markers;
     }
 
@@ -157,8 +162,18 @@ impl TiledMap {
     /// palette uploads, no tile touched.
     pub fn set_outlines(&mut self, gl: &Context, renderer: &Renderer, outlines: Outlines) {
         self.outlines = outlines;
-        renderer.update_palette(gl, &self.palette, &data::palette(self.markers, outlines, &self.icons));
-        renderer.update_palette(gl, &self.hovered, &hovered_style(outlines));
+        renderer.update_palette(gl, &mut self.palette, &data::palette(self.markers, outlines, &self.icons));
+        renderer.update_palette(gl, &mut self.hovered, &hovered_style(outlines));
+    }
+
+    pub fn patterns(&self) -> Patterns {
+        self.patterns
+    }
+
+    /// Restyles the patterns' layer: a palette upload, no tile touched.
+    pub fn set_patterns(&mut self, gl: &Context, renderer: &Renderer, patterns: Patterns) {
+        self.patterns = patterns;
+        renderer.update_palette(gl, &mut self.hatching, &data::hatching(patterns, &self.icons));
     }
 
     /// Draws one frame of `camera`'s view, preparing and uploading the tiles
@@ -209,6 +224,17 @@ impl TiledMap {
                 (false, _) => renderer.draw(gl, &tile.mesh, camera, &self.palette),
                 (true, Some(state)) => renderer.draw_state(gl, &tile.mesh, camera, &self.palette, state, SHOWN),
                 (true, None) => {}
+            }
+        }
+        if self.patterns != Patterns::None {
+            renderer.begin_layer(gl);
+            for &id in &self.plan.draw {
+                let tile = self.cache.get(TileKey { source: COUNTIES, tile: id }).unwrap();
+                match (self.filtered, self.states.get(&id)) {
+                    (false, _) => renderer.draw(gl, &tile.mesh, camera, &self.hatching),
+                    (true, Some(state)) => renderer.draw_state(gl, &tile.mesh, camera, &self.hatching, state, SHOWN),
+                    (true, None) => {}
+                }
             }
         }
         between();
@@ -295,10 +321,17 @@ impl TiledMap {
         svg.symbols(&self.icons.symbols);
         svg.begin_layer();
         let palette = data::palette(self.markers, self.outlines, &self.icons);
-        if self.filtered {
-            svg.draw_state(&mesh, camera, &palette, 0, &self.flags, SHOWN);
-        } else {
-            svg.draw(&mesh, camera, &palette);
+        let hatching = data::hatching(self.patterns, &self.icons);
+        let looks = if self.patterns == Patterns::None { &[palette][..] } else { &[palette, hatching][..] };
+        for (k, palette) in looks.iter().enumerate() {
+            if k > 0 {
+                svg.begin_layer();
+            }
+            if self.filtered {
+                svg.draw_state(&mesh, camera, palette, 0, &self.flags, SHOWN);
+            } else {
+                svg.draw(&mesh, camera, palette);
+            }
         }
         for (bit, palette) in [(SELECTED, selected_style()), (HOVERED, hovered_style(self.outlines))] {
             svg.begin_layer();
@@ -762,4 +795,209 @@ pub fn check_dashes(gl: &Context, renderer: &Renderer, counties: &Counties, size
         segments * 40 / 1024
     ));
     Ok(format!("dash check passed:\n  {}", report.join("\n  ")))
+}
+
+/// Checks pattern fills on a square of one class over the whole view, by
+/// reading the framebuffer, at z2, z14 and the grid's deepest level (each
+/// 0.3 past the level), north up and turned 30 degrees, around the first
+/// county:
+///
+/// - the square drawn from the level's tiles, from one mesh for the view,
+///   and from the tiles six levels up standing in, is the same picture,
+///   so the pattern has no seam at tile edges and keeps its precision in a
+///   stand-in;
+/// - a pattern of four coloured quarters shows, at every pixel clear of a
+///   quarter's edge, the quarter the map point's own place in its repeat,
+///   measured from the map's origin in `f64`, says: anchored to the map,
+///   sized and turned as the camera says, with no swim far from the origin;
+/// - an opaque white pattern, magnified and shrunk to each of the atlas's
+///   mipmaps and past, is white at every pixel, so a repeat's edge shows no
+///   line;
+/// - panned a whole number of pixels, the quarters are the first frame
+///   shifted;
+/// - a click on a hatch's transparent gap picks the square.
+pub fn check_patterns(map: &TiledMap, gl: &Context, renderer: &Renderer, size: [u32; 2]) -> Result<String, String> {
+    let icons = &map.icons;
+    let [w, h] = size.map(|v| v as usize);
+    let grid = TileGrid::web_mercator(512, 20).unwrap();
+    let centre = map.counties.centre(0);
+    let style = |symbol, repeat: f32, fill: [f32; 4]| {
+        let mut p = Palette::new();
+        p.set(1, data::pattern(symbol, repeat, fill));
+        renderer.palette(gl, &p)
+    };
+    const SQUARE: u32 = 7;
+    let square = |b: &mut MeshBuilder, r: Rect| {
+        b.set_class(1);
+        b.set_feature(SQUARE);
+        b.begin_polygon();
+        b.begin_ring();
+        b.points(&[r.min, [r.max[0], r.min[1]], r.max, [r.min[0], r.max[1]], r.min]);
+        b.end_ring();
+        b.end_polygon();
+    };
+    let frame = |camera: &Camera, meshes: &[GpuMesh], palette: &GpuPalette| {
+        renderer.begin_frame(gl, camera, [0.0, 0.0, 0.0, 1.0]);
+        renderer.begin_layer(gl);
+        for m in meshes {
+            renderer.draw(gl, m, camera, palette);
+        }
+        gl.read_pixels(size)
+    };
+    let mut report = Vec::new();
+    for z in [2u8, 14, grid.max_zoom()] {
+        for bearing in [0.0f64, 30.0] {
+            let mut camera = Camera::new([centre[0] + 0.37, centre[1] - 0.61], grid.resolution(z).unwrap() / 0.3f64.exp2(), size);
+            camera.bearing = bearing.to_radians();
+            // Past the view on every side, so a stand-in's coarse snapping
+            // moves the square's edges off the screen, and within the world.
+            let view = camera.visible_bounds();
+            let view = view.expand(0.25 * (view.max[0] - view.min[0]));
+            let world = grid.bounds(TileId { z: 0, x: 0, y: 0 }).unwrap();
+            let r = Rect { min: [view.min[0].max(world.min[0]), view.min[1].max(world.min[1])], max: [view.max[0].min(world.max[0]), view.max[1].min(world.max[1])] };
+            // GL's pixel (col, row), rows bottom up, as a map point, and
+            // whether it lies inside the square clear of its edge.
+            let at = |col: usize, row: usize| camera.screen_to_map([col as f64 + 0.5, (h - row) as f64 - 0.5]);
+            let margin = 2.0 * camera.units_per_px;
+            let inside = |m: [f64; 2]| (0..2).all(|i| m[i] > r.min[i] + margin && m[i] < r.max[i] - margin);
+            let label = format!("z{z}.3 at {bearing}°");
+
+            let mut by_tiles = Vec::new();
+            for id in grid.tiles_in(z, r) {
+                let mut b = MeshBuilder::for_tile(&grid, id).unwrap();
+                square(&mut b, r);
+                by_tiles.push(renderer.upload(gl, &b.finish())?);
+            }
+            let mut b = MeshBuilder::for_view(&camera);
+            square(&mut b, r);
+            let whole = [renderer.upload(gl, &b.finish())?];
+            let mut stand_ins = Vec::new();
+            for id in grid.tiles_in(z.saturating_sub(6), r) {
+                let mut b = MeshBuilder::for_tile(&grid, id).unwrap();
+                square(&mut b, r);
+                stand_ins.push(renderer.upload(gl, &b.finish())?);
+            }
+
+            let quarters = style(icons.quarters, 24.0, [1.0; 4])?;
+            let first = frame(&camera, &whole, &quarters);
+            let differ = |a: &[u8], b: &[u8]| {
+                let off = |i: usize| a[i * 4..][..4].iter().zip(&b[i * 4..][..4]).any(|(a, b)| a.abs_diff(*b) > 8);
+                (0..w * h).filter(|&i| inside(at(i % w, i / w)) && off(i)).count()
+            };
+            for (name, meshes) in [("its tiles", &by_tiles[..]), ("stand-ins six levels up", &stand_ins[..])] {
+                let n = differ(&first, &frame(&camera, meshes, &quarters));
+                if n > 0 {
+                    return Err(format!("{label}: the quarters drawn from {name} differ from one mesh's at {n} pixels"));
+                }
+            }
+
+            // The quarter each pixel shows, from its map point in `f64`.
+            let cell = 24.0;
+            let mut checked = 0;
+            for row in (0..h).step_by(3) {
+                for col in (0..w).step_by(3) {
+                    let m = at(col, row);
+                    if !inside(m) {
+                        continue;
+                    }
+                    let fx = (m[0] / camera.units_per_px / cell).rem_euclid(1.0);
+                    let fy = (-m[1] / camera.units_per_px / cell).rem_euclid(1.0);
+                    // A pixel and a little clear of a quarter's edges.
+                    let clear = |f: f64| [f, (f - 0.5).abs(), 1.0 - f].into_iter().all(|d| d * cell > 1.2);
+                    if !clear(fx) || !clear(fy) {
+                        continue;
+                    }
+                    let want = QUARTERS[(fx >= 0.5) as usize + 2 * (fy >= 0.5) as usize];
+                    let got = &first[(row * w + col) * 4..][..3];
+                    if got.iter().zip(want).any(|(g, w)| g.abs_diff(w) > 24) {
+                        return Err(format!("{label}: pixel ({col}, {row}) shows {got:?}, wanted quarter {want:?}"));
+                    }
+                    checked += 1;
+                }
+            }
+
+            // Panned a whole number of pixels, the frame is the first one
+            // shifted, but where a pixel's centre lies on a repeat's edge: the
+            // wrap is a hard edge there, which a rounding moves it across.
+            let on_edge = |m: [f64; 2]| {
+                (0..2).any(|i| {
+                    let f = (m[i] / camera.units_per_px / cell).rem_euclid(1.0);
+                    f.min(1.0 - f) * cell < 0.02
+                })
+            };
+            let [dx, dy] = [37usize, 23usize];
+            let mut panned = camera;
+            panned.pan_px([dx as f64, dy as f64]);
+            let moved = frame(&panned, &whole, &quarters);
+            let (mut shifted, mut most) = (0, 0u8);
+            for row in dy..h {
+                for col in 0..w - dx {
+                    if !inside(at(col, row)) || !inside(at(col + dx, row - dy)) || on_edge(at(col, row)) {
+                        continue;
+                    }
+                    let (a, b) = (&first[(row * w + col) * 4..][..4], &moved[((row - dy) * w + col + dx) * 4..][..4]);
+                    let d = a.iter().zip(b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+                    most = most.max(d);
+                    shifted += (d > 8) as usize;
+                }
+            }
+            if shifted > 0 {
+                return Err(format!("{label}: panned {dx}, {dy} px, the quarters differ from the first frame shifted at {shifted} pixels"));
+            }
+            quarters.free(gl);
+
+            // Opaque white repeats, magnified, then shrunk to mipmaps 1 and
+            // 2 and past them.
+            let mut darkest = 255u8;
+            for repeat in [40.0, 10.0, 5.0, 3.0] {
+                let solid = style(icons.solid, repeat, [1.0; 4])?;
+                let pixels = frame(&camera, &by_tiles, &solid);
+                solid.free(gl);
+                for row in 0..h {
+                    for col in 0..w {
+                        if inside(at(col, row)) {
+                            let p = &pixels[(row * w + col) * 4..][..3];
+                            if let Some(&v) = p.iter().find(|&&v| v < 250) {
+                                return Err(format!("{label}: a white pattern repeating every {repeat} px has {v} at ({col}, {row})"));
+                            }
+                            darkest = darkest.min(*p.iter().min().unwrap());
+                        }
+                    }
+                }
+            }
+            report.push(format!(
+                "{label}: its tiles, one mesh and stand-ins the same picture; {checked} pixels checked, each the quarter the map says; panned {dx}, {dy} px, shifted, no channel off by more than {most}; white repeats at 40, 10, 5 and 3 px no darker than {darkest}"
+            ));
+            for m in by_tiles.into_iter().chain(whole).chain(stand_ins) {
+                m.free(gl);
+            }
+        }
+    }
+
+    // A pick in a hatch's gap finds the square under it.
+    let camera = Camera::new(centre, grid.resolution(14).unwrap(), size);
+    let r = camera.visible_bounds();
+    let mut b = MeshBuilder::for_view(&camera);
+    square(&mut b, r);
+    let mesh = renderer.upload(gl, &b.finish())?;
+    let hatch = style(icons.hatch, 12.0, [1.0; 4])?;
+    let pixels = frame(&camera, std::slice::from_ref(&mesh), &hatch);
+    let gap = (0..w * h).map(|i| (i % w, i / w)).find(|&(col, row)| {
+        let near = col.abs_diff(w / 2) < 40 && row.abs_diff(h / 2) < 40;
+        near && pixels[(row * w + col) * 4] == 0
+    });
+    let (col, row) = gap.ok_or("no gap in the hatch near the centre")?;
+    let mut picker = Picker::new(gl)?;
+    picker.begin(gl, &camera, [col as f64 + 0.5, (h - row) as f64 - 0.5], 0.0);
+    picker.begin_layer(gl);
+    picker.draw(gl, renderer, &mesh, &camera, &hatch, 0);
+    let picked = picker.finish(gl);
+    picker.free(gl);
+    hatch.free(gl);
+    mesh.free(gl);
+    if picked != Some(Pick { layer: 0, feature: SQUARE }) {
+        return Err(format!("a pick in the hatch's gap at ({col}, {row}) found {picked:?}"));
+    }
+    report.push("a pick in a hatch's gap finds the square".into());
+    Ok(format!("pattern check passed:\n  {}", report.join("\n  ")))
 }

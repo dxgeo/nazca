@@ -19,6 +19,7 @@
 //! [`Marker::new`], [`Dash::new`] or [`Pattern::new`] and assign the fields
 //! wanted.
 
+use crate::camera::Camera;
 use crate::symbol::{SymbolId, Symbols};
 
 /// How many style classes a palette holds: a class is a `u8`.
@@ -111,9 +112,14 @@ impl Dash {
     }
 }
 
-/// A symbol repeated over a fill, anchored to the map, one repeat's longest
-/// side `repeat` pixels at every zoom. A mask pattern takes the class's
-/// `fill` colour.
+/// A symbol repeated over a fill in place of its flat colour, one repeat its
+/// box with the longest side `repeat` pixels at every zoom. The repeats are
+/// laid along the map's axes from the map's origin, a repeat's top left
+/// corner there, so they move and turn with the map and meet across tile
+/// edges. A mask pattern takes the class's `fill` colour; a colour
+/// pattern's alpha is multiplied by the fill's, as a colour marker's is. A
+/// symbol not in the renderer's symbols, or a `repeat` that is not a
+/// positive number, draws nothing, though the fill still picks.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pattern {
@@ -125,6 +131,22 @@ impl Pattern {
     pub fn new(symbol: SymbolId, repeat: f32) -> Pattern {
         Pattern { symbol, repeat }
     }
+
+    /// One repeat's width and height in pixels for a symbol of `size`, or
+    /// `None` where it draws nothing.
+    pub(crate) fn cell(&self, size: [u32; 2]) -> Option<[f64; 2]> {
+        let longest = size[0].max(size[1]);
+        (self.repeat > 0.0 && self.repeat.is_finite() && longest > 0).then(|| size.map(|v| v as f64 * self.repeat as f64 / longest as f64))
+    }
+}
+
+/// Where the camera's centre lies in a pattern of `cell` pixels anchored at
+/// the map's origin: pixels east and north of the south-west corner of the
+/// repeat that holds it, each in `0..cell`. Reduced in `f64`, since the centre's
+/// distance from the origin in pixels is past what an `f32` holds to a
+/// pixel at street level.
+pub(crate) fn pattern_phase(camera: &Camera, cell: [f64; 2]) -> [f64; 2] {
+    std::array::from_fn(|i| (camera.center[i] / camera.units_per_px).rem_euclid(cell[i]))
 }
 
 /// A style per class. Classes never set are [`Style::default`]: nothing
@@ -330,6 +352,21 @@ mod tests {
         assert_eq!(Dash::new(&[0.0, 0.0], 0.0), None);
         assert_eq!(Dash::new(&[f32::INFINITY], 0.0), None);
         assert_eq!(Dash::new(&[1.0], f32::NAN), None);
+    }
+
+    #[test]
+    fn a_pattern_repeats_its_box_from_the_map_origin() {
+        let mut symbols = Symbols::new();
+        let wide = symbols.add(crate::Symbol::new(20, 10, vec![0; 800]).unwrap()).unwrap();
+        assert_eq!(Pattern::new(wide, 30.0).cell([20, 10]), Some([30.0, 15.0]));
+        for repeat in [0.0, -4.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(Pattern::new(wide, repeat).cell([20, 10]), None);
+        }
+        // Far east and south at street level: 2 x 10^8 pixels from the
+        // origin, reduced to its place in a repeat of 30 by 15 exactly.
+        let camera = Camera::new([20_000_000.0 + 0.7, -3_000_000.0 - 0.2], 0.1, [100, 100]);
+        let [x, y] = pattern_phase(&camera, [30.0, 15.0]);
+        assert!((x - 27.0).abs() < 1e-6 && (y - 13.0).abs() < 1e-6, "{x} {y}");
     }
 
     #[test]

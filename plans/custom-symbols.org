@@ -19,7 +19,9 @@ and checked natively and in Chrome's WebGL2. Its two additions, decided
 (2026-11-23) and checked natively and in Chrome's WebGL2: the far line
 start's jitter cured by a run's shared base, and
 =MeshBuilder::line_length=, measuring a line as nazca does, so a line
-start joins exactly. Step 4 is next. Step 7, vector symbols, waits on
+start joins exactly. Step 4, pattern fills, is built (2026-11-24) and checked natively and in
+Chrome's WebGL2 (=--check-patterns=, T in the browser); the spike's views without
+patterns are byte-identical to step 3's. Step 5 is next. Step 7, vector symbols, waits on
 § OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
 symbol at a time. Markers, dashes and pattern fills are three parts that
 share an atlas and a palette layout, so each can be built once the shared
@@ -387,13 +389,36 @@ Ruled out:
 *** Pattern fills
 - *=FILL_FS= samples a pattern* where the class has one: the repeat is
   anchored to the map and sized in pixels, so it doesn't swim as the map
-  pans and keeps its size at every zoom. The anchor is the grid's origin,
-  taken off each tile's origin in =f64= on the CPU and passed as a uniform
-  with the tile's matrix, so the repeat has no seam between tiles and keeps
-  its precision at deep zooms.
+  pans and keeps its size at every zoom. A repeat is the symbol's box, its
+  longest side =repeat=, laid along the map's axes, so it turns with the
+  map, with a repeat's top left corner at the map's origin. Built
+  2026-11-24 otherwise than proposed: the proposal took a grid origin off
+  each tile's origin and passed it with the tile's matrix. The shader
+  instead finds the repeat from the fragment's pixel (=gl_FragCoord=),
+  turned onto the map's axes, plus where the screen's centre lies in the
+  class's repeat, reduced in =f64= on the CPU for each draw
+  (=style::pattern_phase=, an =f32= pair a class in a 128 =vec4= uniform
+  array). So no tile's coordinates enter it: tiles meet without a seam,
+  and a stand-in ancestor, whose coordinates are coarse at a deep zoom,
+  draws it as finely. A per-tile offset couldn't be reduced once for all
+  classes, each repeat being its own size; reduced in the shader, the
+  centre's distance from the origin, 10^8 pixels at street level, is past
+  what an =f32= holds. The renderer therefore keeps each palette's
+  patterned classes and each symbol's size on the CPU, and
+  =update_palette= takes =&mut GpuPalette=, one more break for 0.3.0's
+  notes.
 - *The wrap has no seam either*: the shader picks the mipmap from the
   unwrapped coordinate (=textureGrad=), since the wrapped one jumps at
-  each repeat edge and would pick the smallest mipmap along it.
+  each repeat edge and would pick the smallest mipmap along it. Its
+  gradient is worked out rather than taken by =dFdx=, which the branches
+  before it leave undefined. A sample is clamped to the middle of the
+  symbol's edge texels at the coarser of the two levels blended, so a
+  repeat's edge takes nothing from the atlas's transparent padding. The
+  cost: the wrap is a hard edge, not filtered across, invisible for a
+  symbol drawn to tile.
+- *Colour and alpha* as for a marker: a mask takes the fill's colour, a
+  colour pattern's alpha is multiplied by the fill's. A symbol not held,
+  or a repeat that isn't a positive number, draws nothing.
 - *Picking ignores the pattern*: a fill picks wherever it covers, as a
   fill that draws nothing picks now.
 
@@ -503,7 +528,11 @@ size it was drawn at, or is built from data.
   =mask-type=, sees the same mask.
 - *Patterns* are a =<pattern>= per class, in user space, with the same
   anchor and repeat as on screen, holding a =<use>= of the symbol, tinted
-  the same way. The class's CSS fill names it.
+  the same way. The class's CSS fill names it. Built 2026-11-24: the repeat
+  written is the one holding the camera's centre, so its numbers stay
+  small far from the origin, placed by =patternTransform= (translate,
+  rotate by the bearing, scale); a mask's is a =<rect>= of the fill through
+  the symbol's =<mask>=.
 - *Dashes* are =stroke-dasharray= and =stroke-dashoffset=. SVG restarts a
   dash pattern at each subpath, so a chain whose line starts part-way
   through the pattern is a =<path>= of its own with its own offset, and only
@@ -671,7 +700,10 @@ Ruled out:
    gained the pan, the seams measured by =line_length= and the far line's
    phase at a fractional zoom.
 4. *Pattern fills*: the anchor uniform, =FILL_FS='s pattern sample,
-   =<pattern>= in SVG.
+   =<pattern>= in SVG. Built 2026-11-24, the anchor as the screen centre's
+   place in each class's repeat (§ Pattern fills), with the pattern check
+   (=--check-patterns=, T in the browser) and a hatch or stipple over the
+   counties (=--patterns=, P); checked natively and in Chrome's WebGL2.
 5. *=Symbol::from_svg=* behind the =symbols= feature (§ OPEN QUESTIONS 1),
    and the SVG writer's =<defs>= writing its markup, wrapped to the
    pixels' box, its ids prefixed, a mask's =currentColor= white
@@ -773,7 +805,27 @@ Ruled out:
     pieces show.
   - /Patterns/: a hatch over a flat fill (two palettes), anchored to the map
     while panning, with no seam at tile edges or at the repeat, at z2 and
-    z14.
+    z14. Run 2026-11-24 natively (=--check-patterns=), at z2.3, z14.3 and
+    z20.3, north up and turned 30 degrees, on a square over the view: drawn
+    from the level's tiles, from one mesh and from the tiles six levels up
+    standing in, the same picture inside the square; a pattern of four
+    coloured quarters showing at every pixel clear of a quarter's edge
+    (157,500 to 210,150 checked a view) the quarter its map point's own
+    place in its repeat, from the map's origin in =f64=, says; panned 37 by
+    23 pixels, the first frame shifted, no channel off by more than 1, but
+    for pixel centres within 0.02 pixels of a repeat's edge, where the wrap
+    is a hard edge a rounding moves them across (two pixels at z14.3 turned
+    30 degrees); an opaque white pattern at repeats of 40, 10, 5 and 3
+    pixels for a 16-pixel symbol, magnified and on mipmaps 1 and 2 and
+    past, 255 everywhere; a pick in a hatch's gap finds the fill. Each
+    fails when broken on purpose: the inset at the finer level (237 at a
+    repeat's edge), no inset (236), the implicit gradient, the phase
+    reduced in =f32= (fails at z14.3 turned), the phase tied to the screen,
+    Y not flipped. The spike's counties with a hatch turned 20 degrees and
+    a stipple, and the hatch's SVG the same look in WebKit (Quick Look).
+    The same report in Chrome's WebGL2 (2026-11-24): every view passing
+    with the same numbers but the pixels checked (152,557 to 174,104 on its
+    canvas), and P's hatch whole over the 42 tiles of the counties.
 - *SVG*: unit tests in =svg.rs= for each kind: one =<defs>= entry per symbol
   used, =<use>= placement and rotation, a mask's colour, a =<pattern>='s
   anchor and repeat, a dashed chain's offset. The spike's =--svg= and

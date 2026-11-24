@@ -4,10 +4,11 @@
 //! right-drag to rotate about the canvas's centre, click to pick a county
 //! and toggle its selection, press H to toggle a hover state on the county
 //! picked last, press F to show every other county, press M to cycle the
-//! counties' markers, press D to cycle their outlines, press S to log the
-//! view as an SVG to the console, press C to run the state check, press K
-//! to run the marker check, press X to run the dash check (its report
-//! logged to the console too), and press R to cycle the raster overlay.
+//! counties' markers, press D to cycle their outlines, press P to cycle the
+//! patterns over them, press S to log the view as an SVG to the console,
+//! press C to run the state check, press K to run the marker check, press X
+//! to run the dash check and T the pattern check (their reports logged to
+//! the console too), and press R to cycle the raster overlay.
 //!
 //!   wasm-pack build --target web --release
 //!   python3 -m http.server   # then open http://localhost:8000/
@@ -53,7 +54,7 @@ impl State {
         let s = self.map.draw(&self.gl, &self.renderer, &self.camera);
         if let Some(stats) = &self.stats {
             stats.set_text_content(Some(&format!(
-                "{} · level {} · {} tiles drawn, {} just prepared · {} cached, {} KB · {w}x{h} px · overlay {:?} · markers {:?}{}",
+                "{} · level {} · {} tiles drawn, {} just prepared · {} cached, {} KB · {w}x{h} px · overlay {:?} · markers {:?} · patterns {:?}{}",
                 self.version,
                 s.level,
                 s.drawn,
@@ -62,6 +63,7 @@ impl State {
                 s.cached_bytes / 1024,
                 self.map.overlay(),
                 self.map.markers(),
+                self.map.patterns(),
                 self.picked
             )));
         }
@@ -190,6 +192,18 @@ pub fn start() -> Result<(), JsValue> {
             "d" => {
                 let next = st.map.outlines().next();
                 st.map.set_outlines(&st.gl, &st.renderer, next);
+            }
+            "p" => {
+                let next = st.map.patterns().next();
+                st.map.set_patterns(&st.gl, &st.renderer, next);
+            }
+            "t" => {
+                let report = match tiles::check_patterns(&st.map, &st.gl, &st.renderer, st.camera.size_px) {
+                    Ok(report) => report,
+                    Err(e) => format!("pattern check failed: {e}"),
+                };
+                web_sys::console::log_1(&report.clone().into());
+                st.picked = format!(" · {}", report.lines().next().unwrap_or_default());
             }
             "s" => web_sys::console::log_1(&st.map.svg(&st.camera).into()),
             "x" => {
