@@ -518,7 +518,28 @@ Written as not in the first release: the pixel route draws these symbols
 already (an embedder rasterizes them, or uses =Symbol::from_svg=), and this
 kind is worth its parser and instancing once a symbol has to stay sharp
 past the size it was drawn at, or is built from data. Decided 2026-11-25
-(user decision): in 0.3.0, before it merges.
+(user decision): in 0.3.0, before it merges, and with it:
+- *Symbols built from data.* An embedder styling features from its own
+  data builds markers and patterns from it, as path data or =Sink=
+  geometry, so vector symbols are a format for data-driven symbology, not
+  only for icons. Many may be added and replaced over a session, within
+  the ids a =Symbols= gives (§ The shared part).
+- *In =Symbols=, under the same =SymbolId=s as pixel symbols*, so a
+  =Marker= or =Pattern= names either and palettes are unchanged; only
+  pixel symbols take atlas space. Ruled out: a collection and id type of
+  their own, which a =Style= would need a second way to name.
+- *Markers and pattern fills.* A pattern samples the pixel atlas
+  (§ Pattern fills), so a vector pattern is rasterized into the atlas at
+  its repeat or drawn repeat by repeat; § OPEN QUESTIONS 7 covers it.
+  Ruled out: markers only, which leaves a pattern built from data a pixel
+  symbol the embedder rasterizes.
+- *From any SVG, with the =symbols= feature*: =Symbol::vector_from_svg=
+  reads =usvg='s tree, where shapes, transforms and styles are already
+  resolved to paths, and accepts it when it holds only paths with solid
+  fills and strokes, refusing the rest by name; it stays a pixel symbol
+  through =Symbol::from_svg=. The hand-written path-data parser stays, for
+  the default build. Ruled out: path data only, which makes an embedder
+  extract it from icon files itself.
 
 *** SVG output
 - *=SvgWriter::symbols(&Symbols)=* before the layers that use them. Each
@@ -643,14 +664,23 @@ Ruled out:
    lengths are read through =Dash::lengths=, so its count can't disagree
    with them, and a =Symbol='s size and pixels through accessors, checked
    by =Symbol::new=. Built, clippy's =field_reassign_with_default= doesn't
-   fire on that pattern in an embedder's crate.
+   fire on that pattern in an embedder's crate. =symbol::Kind= joined them
+   2026-11-25, so a kind added later breaks no one.
 7. *Antialiasing vector symbols* (§ Later: vector symbols).
    Narrowed 2026-11-19 (user decision): not multisampling, which smooths
    every edge at once but costs memory and fill rate on every frame, was
    measured too slow in a browser embedder, and is the embedder's
    framebuffer, not nazca's, to choose. Between a feathered outline drawn
    outside the fill and rasterizing into the atlas, open until step 7's
-   spike measures both (§ CHECKS).
+   spike measures both (§ CHECKS). Widened 2026-11-25, with step 7 in 0.3.0
+   drawing patterns too: how a vector pattern fills, rasterized into the
+   atlas at its repeat (the pattern program unchanged) or drawn repeat by
+   repeat; and fill rules, since =earcut= takes a polygon with holes, which
+   serves subpaths that nest, while subpaths that overlap and rely on
+   =nonzero= to merge need splitting, or a union where they are
+   translucent or hold holes. A coverage rasterizer meets both rules
+   exactly. How often icons overlap their subpaths is counted in step 7's
+   first part, against public icon sets.
 8. *Markup handed in by the embedder.* Decided 2026-11-22 (user decision):
    markup only from =Symbol::from_svg=, so =Symbol= has no public markup
    field, and a symbol without the =symbols= feature is written as a PNG.
@@ -907,6 +937,13 @@ Ruled out:
   it, half open so a point on an edge has one tile. The cost: a point just
   outside every tile drawn, whose marker reaches onto the page, is lost at
   the page's edge.
+- *Vector symbols, from data and SVG* (step 7, 2026-11-25): before the
+  GPU part, how many icons in the nine public sets counted for § OPEN
+  QUESTIONS 1 overlap their subpaths, and how many =vector_from_svg=
+  accepts. A pattern built from data over a fill, seamless across tiles at
+  z2 and z14 as the pixel pattern check is, and the same symbol as a
+  marker; a palette rewrite recolours both. Hundreds of symbols added and
+  replaced, as styling from data would, within the id limit.
 - *Vector symbols* (step 7): unit tests of the parser against every
   command, absolute and relative, and arcs; a single-path pin from a
   public-domain icon set (a filled outer contour with a hole, cubic curves)

@@ -201,12 +201,15 @@ svg.symbols(&symbols);                  // or a layout's
     must reach no further than half the tiles' guard band.
     `Palette::check_reach` says whether every marker does, and what guard
     band one needs.
--   **Dashes** are in pixels and have round ends, as lines do, so each dash
-    is drawn a line width longer than its on length and each gap that much
-    shorter. An on length of 0 is a dot. A line handed in as pieces starts
-    each piece where the ones before end, with `MeshBuilder::set_line_start`
-    of their `MeshBuilder::line_length`s summed, so the pattern runs on
-    across the seams.
+-   **Dashes** are up to eight on and off lengths in pixels, with round
+    ends as lines have, so each dash is drawn a line width longer than its
+    on length and each gap that much shorter. An on length of 0 is a dot.
+    A line handed in as pieces starts each piece where the ones before end,
+    with `MeshBuilder::set_line_start` of their `MeshBuilder::line_length`s
+    summed, so the pattern runs on across the seams. Nazca clips to tiles
+    itself and carries the pattern across their edges; geometry clipped
+    before it reaches nazca restarts its pattern at the clip, a polygon's
+    outline included, so hand it whole geometry where dashes must run on.
 -   **From SVG.** With the `symbols` feature, `Symbol::from_svg` rasterizes
     any static SVG with `resvg`, but its text, which needs fonts. It adds
     about 1 MB to a WebAssembly build, under 400 KB gzipped. A browser
@@ -259,7 +262,8 @@ vertex shader, antialiased, with round caps and joins at every zoom. Rasters
 are coloured by a colormap texture, unwarped or stretched over a
 caller-projected control grid. Each pixel belongs to one tile, so tiles that
 overlap never blend twice. Picking draws feature ids into a one-pixel integer
-target. Feature state redraws only the features a small texture of flags
+target; a fill picks wherever it covers, even where its class draws no
+fill. Feature state redraws only the features a small texture of flags
 marks, so a selection or a hover rewrites that texture and no geometry; a
 pick can follow the same flags, so a filtered layer picks only what it shows.
 Markers, dash patterns and pattern fills come from one mipmapped atlas and
@@ -272,8 +276,10 @@ map, seamless across tiles at every zoom.
 and lines are exactly the segments the GPU strokes. A layer's fills and lines
 are gathered into one path per class, so a polygon split along tile edges
 shows no seams in an antialiasing viewer. A border two polygons share is
-drawn once, on screen and in SVG. Feature state works as on the GPU, from
-the same bytes of flags.
+drawn once, on screen and in SVG, in the look of the last feature fed that
+outlines it, so every tile must be fed its features in one order, the same
+for each (by feature id, say). Feature state works as on the GPU, from the
+same bytes of flags.
 
 **Camera.** Pan, zoom and rotate about a point, fit to bounds, and convert
 between screen and map. Matrices are composed in `f64`, so a tile's offset

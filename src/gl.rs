@@ -1427,7 +1427,11 @@ impl Renderer {
 /// are the same as on screen, so the feature on top wins.
 ///
 /// A pick can follow a feature state ([`Picker::draw_state`]), as a screen
-/// draw does. Rasters are not picked, and do not hide the features beneath
+/// draw does. A fill picks wherever it covers, even where its class's fill
+/// is transparent, and a polygon drawn only by its outline picks inside; a
+/// line or point picks only where its class gives it a width or size. So
+/// an embedder leaves out, or draws through a state, a feature that shouldn't
+/// pick. Rasters are not picked, and do not hide the features beneath
 /// them from a pick. Reading back stalls the GPU pipeline, which is free for a click but
 /// wants throttling for hover.
 pub struct Picker {

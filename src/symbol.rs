@@ -58,7 +58,9 @@ const ATLAS_MIN: u32 = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SymbolId(pub(crate) u16);
 
-/// How a symbol's pixels are coloured.
+/// How a symbol's pixels are coloured. `#[non_exhaustive]`, so a kind added
+/// later breaks no one: a `match` on it keeps a `_` arm.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Kind {
     /// Drawn as it is. The alpha of the class's `fill` multiplies its alpha,

@@ -65,7 +65,13 @@ the runs and numbers.
 ** NEXT SESSION
 - *Step 7, vector symbols*, in 0.3.0 before the pull request merges
   (plans/custom-symbols.org § Later: vector symbols, § STEPS 7, § OPEN
-  QUESTIONS 7), then the README and the release notes for it.
+  QUESTIONS 7), then the README and the release notes for it. Decided
+  2026-11-25: symbols built from data; in =Symbols= under the same ids;
+  markers and pattern fills; =Symbol::vector_from_svg= through =usvg=.
+  Order: shapes (data model, path-data parser, flattening, =Sink= parts,
+  caps, =facets=, the overlapping-subpath count), preparation, the § OPEN
+  QUESTIONS 7 spike (patterns and fill rules included; Safari's WebGL2 run
+  by the user), the GPU, SVG output, the spike's look and checks.
 - *Merge* the pull request into =main= (the user's step).
 - *Tag* =v0.3.0= on =main=, its message the release notes in the pull
   request's description, as =v0.2.1='s tag carries its notes, and

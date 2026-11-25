@@ -43,6 +43,13 @@
 //! line. Matched by overlap rather than by equal ends, since one county's
 //! straight edge often meets two neighbours' at a T-junction.
 //!
+//! So a border takes the look of the last feature fed that outlines it, and
+//! where two neighbours' classes differ in colour, width or dash, which one
+//! that is matters. Every tile holding the border must agree, or its look
+//! changes at a tile edge: feed each tile's features in one order, the same
+//! for every tile (by feature id, say). Drawing emphatic features last is
+//! the embedder's, by feeding them last or drawing them as a state.
+//!
 //! Culling whole features before decoding them needs a bounding box the
 //! source already stores (a GeoPackage envelope, a GeoParquet covering
 //! column, a FlatGeobuf index): the caller skips those features rather than
