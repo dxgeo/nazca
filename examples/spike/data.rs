@@ -470,6 +470,24 @@ pub fn palette(markers: Markers, outlines: Outlines, icons: &Icons) -> Palette {
     p
 }
 
+/// The marker cost measurement's looks for class 1 at `size`: a dot, the
+/// colour badge, and the mask pin.
+pub fn grid_looks(icons: &Icons, size: f32) -> [(&'static str, Palette); 3] {
+    let mut dot = Style::default();
+    dot.fill = [0.8, 0.1, 0.1, 1.0];
+    dot.point_size = size;
+    let looks = [
+        ("dots", dot),
+        ("colour markers", marker(icons.badge, size, Align::Screen, 0.0, [1.0; 4])),
+        ("mask markers", marker(icons.pin, size, Align::Screen, 0.0, [0.13, 0.4, 0.85, 1.0])),
+    ];
+    looks.map(|(name, style)| {
+        let mut p = Palette::new();
+        p.set(1, style);
+        (name, p)
+    })
+}
+
 /// A palette whose pin is upright on the screen at [`PIN_ON_MAP`]'s size,
 /// which [`nazca::Palette::check_reach`] refuses.
 pub fn too_far(icons: &Icons) -> Palette {

@@ -38,7 +38,9 @@
 //! phase of a line far along it and the cost of matching borders, reports
 //! and exits. `--patterns` (`hatch` or `stipple`) opens with that pattern
 //! over the counties, as P cycles them. `--check-patterns` checks pattern
-//! fills by reading the framebuffer, reports and exits.
+//! fills by reading the framebuffer, reports and exits. `--measure-markers`
+//! times the 2,500-point grid drawn as dots and as markers, reports and
+//! exits.
 
 mod data;
 mod tiles;
@@ -135,6 +137,7 @@ struct Options {
     level: Option<f64>,
     outlines: Outlines,
     check_dashes: bool,
+    measure_markers: bool,
     patterns: Patterns,
     check_patterns: bool,
 }
@@ -166,6 +169,18 @@ impl App {
         if self.options.filter {
             self.options.filter = false;
             g.map.set_filter(&g.gl, &g.renderer, true);
+        }
+        if self.options.measure_markers {
+            let start = std::time::Instant::now();
+            let clock = move || start.elapsed().as_secs_f64() * 1e3;
+            match tiles::measure_markers(&g.map, &g.gl, &g.renderer, camera.size_px, &clock) {
+                Ok(report) => println!("{report}"),
+                Err(e) => {
+                    eprintln!("marker measurement failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
         }
         if self.options.check_dashes {
             let start = std::time::Instant::now();
@@ -408,7 +423,7 @@ impl ApplicationHandler for App {
 
 fn main() {
     let usage = || -> ! {
-        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state] [--own-gl] [--markers colour|mask|markup] [--check-markers] [--centre NAME] [--level Z] [--outlines dashed|dotted|translucent] [--check-dashes] [--patterns hatch|stipple] [--check-patterns]");
+        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state] [--own-gl] [--markers colour|mask|markup] [--check-markers] [--centre NAME] [--level Z] [--outlines dashed|dotted|translucent] [--check-dashes] [--patterns hatch|stipple] [--check-patterns] [--measure-markers]");
         std::process::exit(2);
     };
     let mut options = Options {
@@ -428,6 +443,7 @@ fn main() {
         level: None,
         outlines: Outlines::Solid,
         check_dashes: false,
+        measure_markers: false,
         patterns: Patterns::None,
         check_patterns: false,
     };
@@ -460,6 +476,10 @@ fn main() {
         }
         if flag == "--check-patterns" {
             options.check_patterns = true;
+            continue;
+        }
+        if flag == "--measure-markers" {
+            options.measure_markers = true;
             continue;
         }
         let value = args.next().unwrap_or_else(|| usage());

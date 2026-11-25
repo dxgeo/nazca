@@ -416,6 +416,47 @@ fn cell_centre(n: u32) -> [f32; 2] {
     [c(n % GRID), c(n / GRID)]
 }
 
+/// Measures the `GRID` x `GRID` points drawn as dots and as markers, at three
+/// sizes, by `clock` in milliseconds: each look drawn ten times a frame, a
+/// layer each, the frame waited for by reading a pixel back, and an empty
+/// frame's time taken off, so what is left is the draws' own cost.
+pub fn measure_markers(map: &TiledMap, gl: &Context, renderer: &Renderer, size: [u32; 2], clock: &dyn Fn() -> f64) -> Result<String, String> {
+    const DRAWS: usize = 10;
+    const FRAMES: usize = 30;
+    let camera = Camera::new([0.0, 0.0], 2.0 / size[0].min(size[1]) as f64, size);
+    let mesh = renderer.upload(gl, &grid_mesh(Kind::Point, 0))?;
+    let time = |draw: &dyn Fn()| {
+        let frame = || {
+            renderer.begin_frame(gl, &camera, [1.0; 4]);
+            draw();
+            gl.read_pixels([1, 1]);
+        };
+        (0..3).for_each(|_| frame());
+        let t = clock();
+        (0..FRAMES).for_each(|_| frame());
+        (clock() - t) / FRAMES as f64
+    };
+    let empty = time(&|| {});
+    let mut report = vec![format!("an empty frame {empty:.3} ms")];
+    for px in [8.0, 24.0, 64.0] {
+        let mut row = Vec::new();
+        for (name, palette) in data::grid_looks(&map.icons, px) {
+            let gpu = renderer.palette(gl, &palette)?;
+            let frame = time(&|| {
+                for _ in 0..DRAWS {
+                    renderer.begin_layer(gl);
+                    renderer.draw(gl, &mesh, &camera, &gpu);
+                }
+            });
+            row.push(format!("{name} {:.3}", (frame - empty) / DRAWS as f64));
+            gpu.free(gl);
+        }
+        report.push(format!("{px} px: {}", row.join(", ")));
+    }
+    mesh.free(gl);
+    Ok(format!("marker cost, ms a draw of {} points at {} x {}:\n  {}", GRID * GRID, size[0], size[1], report.join("\n  ")))
+}
+
 /// Checks what the counties are too few to reach, by drawing `GRID` x `GRID`
 /// features of each primitive and reading the framebuffer: the flags' wrap
 /// onto rows, the edges of a span, ids wrapping past the top of the range,

@@ -8,7 +8,8 @@
 //! patterns over them, press S to log the view as an SVG to the console,
 //! press C to run the state check, press K to run the marker check, press X
 //! to run the dash check and T the pattern check (their reports logged to
-//! the console too), and press R to cycle the raster overlay.
+//! the console too), press B to time markers against dots (logged too), and
+//! press R to cycle the raster overlay.
 //!
 //!   wasm-pack build --target web --release
 //!   python3 -m http.server   # then open http://localhost:8000/
@@ -212,6 +213,16 @@ pub fn start() -> Result<(), JsValue> {
                 let report = match tiles::check_dashes(&st.gl, &st.renderer, st.map.counties(), st.camera.size_px, &clock) {
                     Ok(report) => report,
                     Err(e) => format!("dash check failed: {e}"),
+                };
+                web_sys::console::log_1(&report.clone().into());
+                st.picked = format!(" · {}", report.lines().next().unwrap_or_default());
+            }
+            "b" => {
+                let performance = web_sys::window().and_then(|w| w.performance());
+                let clock = move || performance.as_ref().map_or(0.0, |p| p.now());
+                let report = match tiles::measure_markers(&st.map, &st.gl, &st.renderer, st.camera.size_px, &clock) {
+                    Ok(report) => report,
+                    Err(e) => format!("marker measurement failed: {e}"),
                 };
                 web_sys::console::log_1(&report.clone().into());
                 st.picked = format!(" · {}", report.lines().next().unwrap_or_default());

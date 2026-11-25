@@ -617,6 +617,10 @@ Ruled out:
    added later would otherwise mean preparing every tile again. To measure
    in step 3; an opt-out could follow without breaking anything, where
    making them opt-in later would change how every embedder prepares.
+   Measured 2026-11-25 (§ CHECKS, /Cost/): no time to speak of, a quarter
+   of a line mesh on the CPU and a seventh on the GPU, as estimated. No
+   opt-out for 0.3.0; one can follow if a large line layer needs the
+   memory.
 5. *What =point_size= means for a marker.* Decided 2026-11-19 (user
    decision): its longest side, so a marker fits the same box whatever its
    shape. The alternative, its height, suits pins and labels but makes a
@@ -926,6 +930,26 @@ Ruled out:
   ms, matching (=MeshBuilder::finish=) 0.1 ms; 716 outline segments, 194
   paired; the partner's 8 bytes a segment are 5 KB of the segments' 25 KB,
   of 27 KB with the run's base (40 bytes a segment).
+  Markers against dots, measured 2026-11-25 (=--measure-markers=, B in the
+  browser): the 2,500-point grid drawn ten times a frame, a layer each, an
+  empty frame's time taken off, three runs. Natively (1800 x 1400, Apple
+  silicon, GL 4.1 over Metal), a draw costs 0.1 to 0.4 ms at 8 and 24
+  pixels for dots and markers alike; at 64 pixels, where the grid's
+  28-pixel cells overlap and the draw is fill-bound, dots 1.5 ms, mask
+  markers the same, colour markers 2.0 to 2.2 ms. In Chrome's WebGL2 (1494
+  x 1636), 0.2 to 1.2 ms at 8 and 24 pixels with no order the noise
+  doesn't hide; at 64, dots and mask markers 2.1 to 2.3 ms, colour markers
+  3.1 to 3.2. So a marker costs a dot's time but where it is large and
+  overlapping, and there a colour marker costs about 40% more.
+  Line distances, measured 2026-11-25: every US county (3,222, the
+  geocore-local fixture) prepared into Web Mercator tiles at z4, z6 and
+  z8, as polygons and with their rings fed as lines, against the same
+  build with distances taken out of =prepare.rs=. Preparing: polygons the
+  same either way (14.2 and 14.3 ms at z4, 64.3 and 64.5 at z8); lines 0.6
+  to 0.7 ms more (3.2 and 2.5 at z4, 54.4 and 53.7 at z8). Bytes: a
+  quarter of a line mesh on the CPU (509 of 2,001 KB at z4) and a sixth of
+  a polygon mesh (495 of 2,899 KB); on the GPU 8 of a segment's 40 bytes,
+  a seventh of a line mesh with its vertices (472 of about 3,380 KB at z4).
   The =symbols= feature, measured 2026-11-24 on the browser spike's
   release wasm: 404 KB, 177 KB gzipped, without it (step 4); 1,042 KB,
   416 KB gzipped, with =resvg= alone; 1,378 KB, 554 KB gzipped, with its

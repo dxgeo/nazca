@@ -82,8 +82,9 @@ the runs and numbers.
   =-- --outlines dashed= to start dashed. D cycles the outlines, P the
   patterns, M the markers (colour, mask, markup), H hovers the county
   picked last, and =--check-dashes= and =--check-patterns= run their checks
-  and exit.
+  and exit. =--measure-markers= times the point grid as dots and markers.
 - Browser: =cd spike-web && wasm-pack build --target web --release=, then
   =python3 -m http.server= there and open the page. X runs the dash check
-  and T the pattern check, each logging its report to the console.
+  and T the pattern check, each logging its report to the console; B
+  times markers against dots.
 - Tests: =cargo test --all-features=.
