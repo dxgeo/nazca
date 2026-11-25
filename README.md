@@ -107,9 +107,9 @@ The native spike draws the Massachusetts counties in a window, and a click
 picks one and selects it. F shows every other county through a state, and
 `--svg out.svg` writes the view as an SVG:
 
-    cargo run --features gl --example spike
-    cargo run --features gl --example spike -- --screenshot out.png
-    cargo run --features gl --example spike -- --filter --svg out.svg
+    cargo run --features gl,symbols --example spike
+    cargo run --features gl,symbols --example spike -- --screenshot out.png
+    cargo run --features gl,symbols --example spike -- --filter --svg out.svg
 
 `spike-web/` is the same in a browser:
 

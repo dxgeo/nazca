@@ -33,8 +33,11 @@
 //!   it placed, sized and turned as on screen, or for a mask a `<rect>` of
 //!   the class's fill through a `<mask>` of it. Each symbol a marker or a
 //!   pattern uses is written once, in `<defs>`, from the [`Symbols`] given to
-//!   [`SvgWriter::symbols`]: as a PNG of its pixels, stored uncompressed by
-//!   a small encoder here. A mask's PNG is white where it is opaque, so a
+//!   [`SvgWriter::symbols`], filling the box of its pixels: as its markup
+//!   when `Symbol::from_svg` built it (the `symbols` feature), an `<svg>` of
+//!   the pixels' size around `usvg`'s rewrite, or else as a PNG of its
+//!   pixels, stored uncompressed by a small encoder here. A mask's PNG is
+//!   white where it is opaque, and its markup's `currentColor` white, so a
 //!   viewer reading the mask by luminance, without `mask-type: alpha`, sees
 //!   the same mask. A point is written by the tile whose own area holds it,
 //!   so a point in a neighbour's guard band too is written once, not once
@@ -357,8 +360,14 @@ impl SvgWriter {
                 let symbol = &self.symbols[id];
                 let mask = symbol.kind == Kind::Mask;
                 let (w, h) = (symbol.width(), symbol.height());
-                let png = png(w, h, symbol.pixels(), mask);
-                let _ = writeln!(out, r#"<image id="sym{id}" width="{w}" height="{h}" href="data:image/png;base64,{}"/>"#, base64(&png));
+                // Either way a box of its pixels, so its `<use>`s don't change.
+                if let Some(markup) = symbol.markup() {
+                    let [vw, vh] = markup.size.map(|v| fine(v as f64));
+                    let _ = writeln!(out, r#"<svg id="sym{id}" width="{w}" height="{h}" viewBox="0 0 {vw} {vh}" preserveAspectRatio="none">{}</svg>"#, markup.svg);
+                } else {
+                    let png = png(w, h, symbol.pixels(), mask);
+                    let _ = writeln!(out, r#"<image id="sym{id}" width="{w}" height="{h}" href="data:image/png;base64,{}"/>"#, base64(&png));
+                }
                 if mask {
                     let _ = writeln!(out, r##"<mask id="mask{id}" style="mask-type:alpha"><use href="#sym{id}"/></mask>"##);
                 }
@@ -966,6 +975,97 @@ mod tests {
         p.set(2, Style::default());
         p.set(3, Style::default());
         assert!(!write_patterns(&cam, &p, Some(&symbols)).contains("<path"));
+    }
+
+    /// Writes a point of class 1, and a square of class 2 around it, with
+    /// `marker` and `pattern` drawing from `symbols`.
+    #[cfg(feature = "symbols")]
+    fn write_symbols(symbols: &Symbols, marker: crate::SymbolId, pattern: crate::SymbolId) -> String {
+        use crate::style::{Marker, Pattern};
+        let cam = camera();
+        let mut p = Palette::new();
+        p.set(1, Style { fill: [1.0, 0.0, 0.0, 1.0], point_size: 8.0, marker: Some(Marker::new(marker)), ..Style::default() });
+        p.set(2, Style { fill: [0.0, 0.0, 1.0, 1.0], pattern: Some(Pattern::new(pattern, 8.0)), ..Style::default() });
+        let mut b = MeshBuilder::for_view(&cam);
+        b.set_class(1);
+        b.point([100.0, 50.0]);
+        b.set_class(2);
+        b.begin_polygon();
+        b.begin_ring();
+        b.points(&[[60.0, 20.0], [140.0, 20.0], [140.0, 80.0], [60.0, 80.0], [60.0, 20.0]]);
+        b.end_ring();
+        b.end_polygon();
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.symbols(symbols);
+        svg.draw(&b.finish(), &cam, &p);
+        svg.finish()
+    }
+
+    #[cfg(feature = "symbols")]
+    const GRADIENT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><defs><linearGradient id="a"><stop offset="0" stop-color="COLOUR"/><stop offset="1" stop-color="white"/></linearGradient></defs><rect width="8" height="8" fill="url(#a)"/></svg>"#;
+
+    #[cfg(feature = "symbols")]
+    #[test]
+    fn a_symbol_from_markup_is_written_as_its_markup() {
+        let icon = GRADIENT.replace("COLOUR", "red");
+        let mut symbols = Symbols::new();
+        let from_svg = symbols.add(Symbol::from_svg(&icon, 4.0, 1.0, Kind::Colour).unwrap()).unwrap();
+        let from_pixels = symbols.add(Symbol::new(4, 4, [10, 20, 30, 255].repeat(16)).unwrap()).unwrap();
+        let markup = symbols.get(from_svg).unwrap().markup().unwrap().svg.clone();
+        // The markup in a box of its pixels; the pixels as a PNG.
+        let out = write_symbols(&symbols, from_svg, from_pixels);
+        assert!(out.contains(&format!(r#"<svg id="sym0" width="4" height="4" viewBox="0 0 8 8" preserveAspectRatio="none">{markup}</svg>"#)), "{out}");
+        assert!(out.contains(r#"<image id="sym1" width="4" height="4" href="data:image/png;base64,"#), "{out}");
+        // Each is placed the same way whichever it is.
+        let swapped = write_symbols(&symbols, from_pixels, from_svg);
+        let uses = |out: &str| out.lines().filter(|l| l.contains("<use ") || l.starts_with("<pattern ")).map(|l| l.replace("sym0", "symN").replace("sym1", "symN")).collect::<Vec<_>>();
+        assert_eq!(uses(&out), uses(&swapped));
+        assert!(out.contains(r##"<use href="#sym0" transform="translate(100,50) scale(2) translate(-2,-2)"/>"##), "{out}");
+    }
+
+    #[cfg(feature = "symbols")]
+    #[test]
+    fn two_icons_defining_one_id_keep_their_own() {
+        let mut symbols = Symbols::new();
+        let red = symbols.add(Symbol::from_svg(&GRADIENT.replace("COLOUR", "red"), 4.0, 1.0, Kind::Colour).unwrap()).unwrap();
+        let blue = symbols.add(Symbol::from_svg(&GRADIENT.replace("COLOUR", "blue"), 4.0, 1.0, Kind::Colour).unwrap()).unwrap();
+        let out = write_symbols(&symbols, red, blue);
+        // Each symbol's gradient is the one it defines.
+        let gradient_of = |id: &str, colour: &str| {
+            let at = out.find(&format!(r#"<svg id="{id}""#)).unwrap();
+            let def = &out[at..at + out[at..].find("\n").unwrap()];
+            let name = def.split("<linearGradient id=\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+            assert!(name.ends_with("-a") && def.contains(&format!("fill=\"url(#{name})\"")) && def.contains(colour), "{def}");
+            name
+        };
+        let (a, b) = (gradient_of("sym0", "#ff0000"), gradient_of("sym1", "#0000ff"));
+        assert_ne!(a, b);
+        assert_eq!(out.matches(&format!("id=\"{a}\"")).count(), 1, "{out}");
+    }
+
+    #[cfg(feature = "symbols")]
+    #[test]
+    fn a_masks_markup_is_white() {
+        let pin = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4" fill="currentColor"/></svg>"#;
+        let mut symbols = Symbols::new();
+        let mask = symbols.add(Symbol::from_svg(pin, 4.0, 1.0, Kind::Mask).unwrap()).unwrap();
+        let out = write_symbols(&symbols, mask, mask);
+        let at = out.find(r#"<svg id="sym0""#).unwrap();
+        let def = &out[at..at + out[at..].find('\n').unwrap()];
+        assert!(def.contains(r##"fill="#ffffff""##) && !def.contains("#000000"), "{def}");
+        assert!(out.contains(r##"<mask id="mask0" style="mask-type:alpha"><use href="#sym0"/></mask>"##), "{out}");
+        assert!(out.contains(r#"<rect class="m0-1" width="4" height="4" mask="url(#mask0)""#), "{out}");
+    }
+
+    #[cfg(feature = "symbols")]
+    #[test]
+    fn a_root_at_another_aspect_fills_the_pixels_box() {
+        // 30 x 10 to a longest side of 4: 4 x 1.33, rounded to 4 x 1.
+        let wide = r#"<svg xmlns="http://www.w3.org/2000/svg" width="30" height="10"><rect width="30" height="10"/></svg>"#;
+        let mut symbols = Symbols::new();
+        let id = symbols.add(Symbol::from_svg(wide, 4.0, 1.0, Kind::Colour).unwrap()).unwrap();
+        let out = write_symbols(&symbols, id, id);
+        assert!(out.contains(r#"<svg id="sym0" width="4" height="1" viewBox="0 0 30 10" preserveAspectRatio="none"><svg width="30" height="10""#), "{out}");
     }
 
     #[test]

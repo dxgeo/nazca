@@ -181,6 +181,10 @@ pub enum Markers {
     /// One mask, a pin anchored at its tip, in three classes' colours: two
     /// upright on the screen, one turning with the map and translucent.
     Mask,
+    /// As `Mask`, but the second class a badge, and both symbols from SVG
+    /// markup ([`nazca::Symbol::from_svg`]): the pin a mask painted in
+    /// `currentColor`, the badge in colour with a gradient.
+    Markup,
 }
 
 impl Markers {
@@ -188,7 +192,8 @@ impl Markers {
         match self {
             Markers::None => Markers::Colour,
             Markers::Colour => Markers::Mask,
-            Markers::Mask => Markers::None,
+            Markers::Mask => Markers::Markup,
+            Markers::Markup => Markers::None,
         }
     }
 }
@@ -196,7 +201,8 @@ impl Markers {
 /// The markers' and patterns' symbols, drawn by [`rasterize`] as an
 /// embedder's own rasterizer would hand them in: larger than they are
 /// drawn, transparent pixels black. The pattern check's own two are opaque
-/// squares of 16: white, and four coloured quarters.
+/// squares of 16: white, and four coloured quarters. Two more come from SVG
+/// markup, [`PIN_SVG`] and [`BADGE_SVG`].
 pub struct Icons {
     pub symbols: Symbols,
     badge: SymbolId,
@@ -206,7 +212,17 @@ pub struct Icons {
     stipple: SymbolId,
     pub solid: SymbolId,
     pub quarters: SymbolId,
+    pin_svg: SymbolId,
+    badge_svg: SymbolId,
 }
+
+/// The pin as SVG: the same head over a point, its outline the tangents from
+/// the tip, the hole cut by `evenodd`.
+pub const PIN_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 48"><path fill="currentColor" fill-rule="evenodd" d="M16 46.5 3.243 22.893A14.5 14.5 0 1 1 28.757 22.893ZM16 10.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 1 0 0-11Z"/></svg>"#;
+
+/// A badge as SVG: a dark ring around a disc shading from white to blue, and
+/// a red centre. Its gradient's id is `a`, as an exported icon's would be.
+pub const BADGE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><defs><radialGradient id="a"><stop offset="0.3" stop-color="#fff"/><stop offset="1" stop-color="#6aa0e0"/></radialGradient></defs><circle cx="32" cy="32" r="28" fill="url(#a)" stroke="#282828" stroke-width="4"/><circle cx="32" cy="32" r="9" fill="#c81e1e"/></svg>"##;
 
 /// The pattern check's quarters: top left, top right, bottom left, bottom
 /// right.
@@ -260,7 +276,13 @@ pub fn icons() -> Icons {
     let stipple = add(Symbol::new(32, 32, stipple).unwrap());
     let solid = add(Symbol::new(16, 16, solid).unwrap());
     let quarters = add(Symbol::new(16, 16, quarters).unwrap());
-    Icons { symbols, badge, arrow, pin, hatch, stipple, solid, quarters }
+    // Rasterized as large as the pixel ones: three image pixels a drawn one
+    // at the sizes they are drawn.
+    let mut pin_svg = Symbol::from_svg(PIN_SVG, PIN_ON_MAP, 3.0, Kind::Mask).unwrap();
+    pin_svg.anchor = [0.5, (PIN.1 / PIN.0 as f64) as f32];
+    let pin_svg = add(pin_svg);
+    let badge_svg = add(Symbol::from_svg(BADGE_SVG, 22.0, 3.0, Kind::Colour).unwrap());
+    Icons { symbols, badge, arrow, pin, hatch, stipple, solid, quarters, pin_svg, badge_svg }
 }
 
 /// RGBA8 pixels of `w` x `h`, from `paint`'s colour at a position, or none,
@@ -435,6 +457,11 @@ pub fn palette(markers: Markers, outlines: Outlines, icons: &Icons) -> Palette {
             marker(icons.pin, PIN_ON_SCREEN, Align::Screen, 0.0, [0.13, 0.4, 0.85, 1.0]),
             marker(icons.pin, PIN_ON_SCREEN, Align::Screen, 0.0, [0.1, 0.6, 0.3, 1.0]),
             marker(icons.pin, PIN_ON_MAP, Align::Map, 0.0, [0.55, 0.2, 0.7, 0.75]),
+        ],
+        Markers::Markup => [
+            marker(icons.pin_svg, PIN_ON_SCREEN, Align::Screen, 0.0, [0.13, 0.4, 0.85, 1.0]),
+            marker(icons.badge_svg, 22.0, Align::Screen, 0.0, WHITE),
+            marker(icons.pin_svg, PIN_ON_MAP, Align::Map, 0.0, [0.55, 0.2, 0.7, 0.75]),
         ],
     };
     for (k, look) in looks.into_iter().enumerate() {

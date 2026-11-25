@@ -18,6 +18,10 @@ gl = ["dep:glow", "dep:web-sys"]
 # Vector tile decoders for basemaps, hand-written: no dependency.
 mvt = []
 mlt = []
+# `Symbol::from_svg`: icons as SVG markup, rasterized by `resvg` and written
+# back by the SVG writer as `usvg`'s rewrite (plans/custom-symbols.org § OPEN
+# QUESTIONS 1 and 8).
+symbols = ["dep:resvg", "dep:usvg"]
 
 [dependencies]
 # Nazca does not depend on `geosetta` or `geoscribe`, and as of geosetta 0.27.0
@@ -25,6 +29,12 @@ mlt = []
 # compose by piping text between their CLIs, or by a caller that links several
 # of them (see ../../architecture.org).
 glow = { version = "0.18.0", optional = true }
+# Fonts off: an icon's text is dropped, so nazca reads no files and needs no
+# font database. `raster-images` decodes a JPEG, GIF or WebP an icon embeds, so
+# the screen draws what its markup does.
+resvg = { version = "0.50.0", default-features = false, features = ["raster-images"], optional = true }
+# `resvg`'s own, named for its writer, which `resvg` leaves off.
+usvg = { version = "0.50.0", default-features = false, features = ["writer"], optional = true }
 
 # The browser's WebGL2 context, which `gl::Context::from_webgl2` takes. Already
 # in the tree through `glow`; named here so nazca's API need not name `glow`.
@@ -57,4 +67,4 @@ required-features = ["mlt"]
 
 [[example]]
 name = "spike"
-required-features = ["gl"]
+required-features = ["gl", "symbols"]

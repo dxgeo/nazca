@@ -7,7 +7,7 @@ Written 2026-11-24, on the =custom-symbols= branch. What is open lives in
 [[file:plans/custom-symbols.org][plans/custom-symbols.org]], the plan this branch builds for 0.3.0.
 
 ** WHERE IT STANDS
-Custom symbols' steps 0 to 4 are built and committed on =custom-symbols=,
+Custom symbols' steps 0 to 5 are built and committed on =custom-symbols=,
 unreleased:
 
 - *Step 0*: nazca's own =gl::Context=.
@@ -39,26 +39,40 @@ unreleased:
   without patterns are byte-identical to step 3's. The same check passes
   in Chrome's WebGL2.
 
-§ CHECKS (/Dashes/, /A far line start/, /Patterns/) has the runs and
-numbers.
+- *Step 5*: =Symbol::from_svg(markup, size, scale, kind)= behind the
+  =symbols= feature (=resvg= and =usvg= 0.50, fonts off), and the SVG
+  writer writing its markup in =<defs>=, built 2026-11-24. =kind= is an
+  argument, not set after, since it decides what =currentColor= paints.
+  The spike's M or =--markers markup= draws a pin and a badge from markup;
+  its =--svg= matches its =--screenshot= in =resvg= and in Chrome but for
+  the symbols' edges, the same look draws in Chrome's WebGL2, and views
+  without markup are byte-identical to step 4's. The spike now needs
+  =--features gl,symbols=.
+
+§ CHECKS (/Dashes/, /A far line start/, /Patterns/, /Markup/, /Cost/) has
+the runs and numbers.
 
 ** NEXT SESSION
-- *Step 5*: =Symbol::from_svg= behind the =symbols= feature, and the SVG
-  writer's =<defs>= writing its markup (§ OPEN QUESTIONS 8, § SVG output,
-  § CHECKS /Markup/).
+- *Decide*: keep =resvg='s =raster-images= on? It decodes a JPEG, GIF or
+  WebP an icon embeds, so the screen draws what the markup does; off, such
+  an image is in the SVG output but not on screen. It is 337 KB of the
+  browser spike's wasm (138 KB gzipped) of the feature's 975 KB (377 KB);
+  only an embedder enabling =symbols= pays either (§ CHECKS, /Cost/).
+- *Step 6*: the README's symbols section and the 0.3.0 release
+  (§ STEPS 6).
 
 ** ALSO OPEN
 - *Darker dots at a translucent line's vertices.* Each segment's round end
   overlaps the next one's, so the line blends twice there. This is a known
   limit, in plans/rendering.org § BACKENDS, from before this branch and
   separate from step 3.
-- After step 5: step 6 and the 0.3.0 release, whose notes cover the
-  =update_palette= change with the two breaks.
+- The 0.3.0 release notes cover the =update_palette= change with the two
+  breaks.
 
 ** RUNNING THINGS
-- Native: =cargo run --release --features gl --example spike=. Add
+- Native: =cargo run --release --features gl,symbols --example spike=. Add
   =-- --outlines dashed= to start dashed. D cycles the outlines, P the
-  patterns, H hovers the county picked last, and =--check-dashes= and
+  patterns, M the markers (colour, mask, markup), H hovers the county picked last, and =--check-dashes= and
   =--check-patterns= run their checks and exit.
 - Browser: =cd spike-web && wasm-pack build --target web --release=, then
   =python3 -m http.server= there and open the page. X runs the dash check

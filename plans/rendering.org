@@ -254,7 +254,8 @@ dash and a pattern, each naming a symbol by id from a =Symbols= atlas
 =Style::default()= and assigns. The palette texture is 256 x 7. The design
 and what draws them is plans/custom-symbols.org: markers draw (step 2,
 2026-11-21), and so do dashes (step 3, 2026-11-23) and pattern fills
-(step 4, 2026-11-24).
+(step 4, 2026-11-24); with the =symbols= feature, =Symbol::from_svg= makes
+one from SVG markup, which SVG output writes back (step 5, 2026-11-24).
 
 /Zoom-dependent values, 2026-10-30:/ a =circle-radius= can follow
 =["interpolate", ["linear"], ["zoom"], 3, 1, 10, 5]=. =style::interpolate(stops,
@@ -443,7 +444,8 @@ What the charter does cost:
 | =tiny-skia= | =raster= | PNG export, server-side raster tiles |
 
 Not a backend but also feature-gated: =mvt= (decoder, no dependency;
-§ V1 FEATURES) and =text= (glyphs; § LABELS).
+§ V1 FEATURES), =symbols= (=resvg=: icons from SVG markup;
+plans/custom-symbols.org) and =text= (glyphs; § LABELS).
 
 - =glow= over =wgpu=: a thin, pure-Rust GL binding that covers WebGL2 and
   native GL and adds tens of KB to a wasm build rather than megabytes. WebGPU

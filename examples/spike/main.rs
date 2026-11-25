@@ -9,9 +9,9 @@
 //! translucent), press P to cycle the patterns over the counties (a hatch,
 //! a stipple), and press R to cycle the raster overlay.
 //!
-//!   cargo run -p nazca --features gl --example spike
-//!   cargo run -p nazca --features gl --example spike -- --screenshot out.png
-//!   cargo run -p nazca --features gl --example spike -- --bearing 30 --raster continuous
+//!   cargo run -p nazca --features gl,symbols --example spike
+//!   cargo run -p nazca --features gl,symbols --example spike -- --screenshot out.png
+//!   cargo run -p nazca --features gl,symbols --example spike -- --bearing 30 --raster continuous
 //!
 //! `--screenshot` draws one frame, writes it as a PNG and exits. `--bearing`
 //! opens the map turned that many degrees, east of north up. `--raster`
@@ -26,7 +26,8 @@
 //! makes GL calls of the spike's own between two of nazca's layers, through
 //! a `glow` binding of its own over the same context, as an embedder drawing
 //! something of its own would: a square in the top left corner. `--markers`
-//! (`colour` or `mask`) opens with the counties' markers, as M cycles them.
+//! (`colour`, `mask` or `markup`, the last from SVG markup) opens with the
+//! counties' markers, as M cycles them.
 //! `--check-markers` checks the guard band check and picking a marker by its
 //! image, reports and exits. `--centre NAME` centres the view on that
 //! county's marker, and `--level Z` sets the zoom to MapLibre's zoom `Z`
@@ -407,7 +408,7 @@ impl ApplicationHandler for App {
 
 fn main() {
     let usage = || -> ! {
-        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state] [--own-gl] [--markers colour|mask] [--check-markers] [--centre NAME] [--level Z] [--outlines dashed|dotted|translucent] [--check-dashes] [--patterns hatch|stipple] [--check-patterns]");
+        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state] [--own-gl] [--markers colour|mask|markup] [--check-markers] [--centre NAME] [--level Z] [--outlines dashed|dotted|translucent] [--check-dashes] [--patterns hatch|stipple] [--check-patterns]");
         std::process::exit(2);
     };
     let mut options = Options {
@@ -478,6 +479,7 @@ fn main() {
                 options.markers = match value.as_str() {
                     "colour" => Markers::Colour,
                     "mask" => Markers::Mask,
+                    "markup" => Markers::Markup,
                     _ => usage(),
                 }
             }

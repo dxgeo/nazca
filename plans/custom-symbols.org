@@ -21,7 +21,10 @@ start's jitter cured by a run's shared base, and
 =MeshBuilder::line_length=, measuring a line as nazca does, so a line
 start joins exactly. Step 4, pattern fills, is built (2026-11-24) and checked natively and in
 Chrome's WebGL2 (=--check-patterns=, T in the browser); the spike's views without
-patterns are byte-identical to step 3's. Step 5 is next. Step 7, vector symbols, waits on
+patterns are byte-identical to step 3's. Step 5, =Symbol::from_svg= and
+its markup in SVG output, is built (2026-11-24) and checked natively, in
+=resvg= and in Chrome, its markers in Chrome's WebGL2; the spike's views
+without markup are byte-identical to step 4's. Step 6 is next. Step 7, vector symbols, waits on
 § OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
 symbol at a time. Markers, dashes and pattern fills are three parts that
 share an atlas and a palette layout, so each can be built once the shared
@@ -707,11 +710,24 @@ Ruled out:
 5. *=Symbol::from_svg=* behind the =symbols= feature (§ OPEN QUESTIONS 1),
    and the SVG writer's =<defs>= writing its markup, wrapped to the
    pixels' box, its ids prefixed, a mask's =currentColor= white
-   (§ OPEN QUESTIONS 8).
+   (§ OPEN QUESTIONS 8). Built 2026-11-24 as
+   =Symbol::from_svg(markup, size, scale, kind)=: =size= the longest side
+   in drawn pixels, as =point_size= is, and =kind= an argument, since it
+   decides what =currentColor= paints (white for a mask, black otherwise),
+   so the pixels and the markup come from one tree whatever the kind. Ids
+   are prefixed by an FNV-1a hash of =usvg='s unprefixed rewrite, fixed
+   across Rust versions as =std='s hash is not. =usvg= is a dependency of
+   its own for its writer, which =resvg= leaves off; =resvg='s
+   =raster-images= is on, so a JPEG, GIF or WebP an icon embeds draws on
+   screen as in its markup (§ CHECKS, /Cost/, for what that costs). The
+   spike gains a third look of markers, M or =--markers markup=: the pin
+   and a badge with a gradient from markup, and needs the =symbols=
+   feature.
 6. *The README* (a section on symbols: kinds, sizes and the quarter floor
    on drawing them small, the guard band rule, how round ends lengthen
-   dashes, a line handed in as pieces started by =line_length=, what SVG
-   output writes; its palette
+   dashes, a line handed in as pieces started by =line_length=, the
+   =symbols= feature's =Symbol::from_svg= and what it costs a wasm build,
+   what SVG output writes; its palette
    example built from =Style::default()= by assignment; its setup building
    a =gl::Context= in place of a =glow= one) and *a release*, 0.3.0 as
    § OPEN QUESTIONS 6 says, its notes covering both breaks.
@@ -836,11 +852,29 @@ Ruled out:
   =currentColor= mask icon is white in its =<mask>=; a root at another
   aspect than its pixels fills their box. The spike's =--svg= of a pin
   from markup matches its =--screenshot=, in a browser and in =resvg=.
+  Run 2026-11-24: those four, and in =symbol.rs= a symbol's pixels and
+  rewrite from one tree, a prolog, =<style>= (applied), script, file
+  image and text gone from the rewrite, and the refusals. The spike's
+  counties turned 30 degrees with =--markers markup= (the mask pin upright
+  and turning with the map, translucent, and the colour badge, its
+  gradient's id =a= prefixed), its =--svg= against its =--screenshot= at
+  1800 x 1400: in =resvg= 1,006 pixels differ by more than 32 levels, of
+  which 659 do without markers (outline antialiasing) and 1,983 with the
+  pixel pins; in Chrome, drawn to a canvas, 2,952, 2,445 and 2,470. The
+  differences lie on the symbols' edges, as crops show: the screen samples
+  a 3x image through mipmaps where a viewer draws the vector edge; shapes,
+  anchors, turns, colours and the gradient match. In Chrome's WebGL2 M
+  draws the same look, S writes the same markup, the wasm build's prefix
+  the native one's, and K's marker check passes with it on. The spike's
+  views without markup (plain, colour and mask markers, hatch, stipple,
+  dashed) are byte-identical to step 4's in PNG and SVG; the native
+  marker, dash, pattern and state checks pass.
 - *Mask support* in the viewers SVG output is read by: browsers, and a
   rasterizer such as =resvg=. =mask-type: alpha= is the part to check.
   Checked 2026-11-21 in WebKit (macOS Quick Look): the spike's pins match
-  its screenshot. =resvg= is not checked yet; the white PNG makes a
-  luminance mask agree anyway.
+  its screenshot. Checked 2026-11-24 in =resvg= 0.50 and Chrome (§ CHECKS,
+  /Markup/): the pixel pins' PNG masks and the markup pin's white
+  =currentColor= alike.
 - *Points in two guard bands.* Nothing clips the SVG writer's output by
   tile, so a point held by two tiles may be written twice. Invisible for an
   opaque dot; a translucent marker would show it. Check, and if so, write a
@@ -876,3 +910,8 @@ Ruled out:
   ms, matching (=MeshBuilder::finish=) 0.1 ms; 716 outline segments, 194
   paired; the partner's 8 bytes a segment are 5 KB of the segments' 25 KB,
   of 27 KB with the run's base (40 bytes a segment).
+  The =symbols= feature, measured 2026-11-24 on the browser spike's
+  release wasm: 404 KB, 177 KB gzipped, without it (step 4); 1,042 KB,
+  416 KB gzipped, with =resvg= alone; 1,378 KB, 554 KB gzipped, with its
+  =raster-images= too. An embedder that rasterizes its icons itself pays
+  none of it; whether =raster-images= stays on is open (../HANDOFF.org).

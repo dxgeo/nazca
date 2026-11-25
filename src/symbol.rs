@@ -7,6 +7,22 @@
 //! the device's pixel ratio or more, and says so in the symbol's scale. A
 //! symbol has no size of its own; the style gives it one.
 //!
+//! With the `symbols` feature, `Symbol::from_svg` rasterizes an icon's SVG
+//! markup with `resvg` instead, and keeps `usvg`'s rewrite of it, which the
+//! SVG writer writes in place of the pixels. Pixels and markup come from one
+//! parsed tree, so they can't disagree. That rewrite is the only markup a
+//! symbol carries (`../plans/custom-symbols.org` § OPEN QUESTIONS 8):
+//!
+//! - *It is one `<svg>` root of a known size*, with no prolog, no `<style>`,
+//!   no scripts and no external references; an `<image>` it embeds is a data
+//!   URL, and one naming a file or a URL is dropped, so nazca still reads no
+//!   files. Text is dropped too: the feature has no fonts.
+//! - *Its ids are prefixed by a hash of it*, so two icons that each define
+//!   `id="a"` keep their own gradients and clips in one document.
+//! - *A mask's `currentColor` is white*, so it masks the same in a viewer
+//!   that reads masks by luminance as in one that reads `mask-type: alpha`.
+//!   A colour symbol's is black, a browser's default.
+//!
 //! [`Symbols`] holds them by [`SymbolId`] and packs them into one atlas, in
 //! shelves:
 //!
@@ -68,6 +84,15 @@ pub struct Symbol {
     /// width and height from its top left. The centre by default.
     pub anchor: [f32; 2],
     pub kind: Kind,
+    markup: Option<Markup>,
+}
+
+/// `usvg`'s rewrite of the markup a symbol was rasterized from, and its
+/// root's size, which the pixels fill.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Markup {
+    pub(crate) svg: String,
+    pub(crate) size: [f32; 2],
 }
 
 impl Symbol {
@@ -78,7 +103,45 @@ impl Symbol {
         if width == 0 || height == 0 || pixels.len() as u64 != width as u64 * height as u64 * 4 {
             return None;
         }
-        Some(Symbol { width, height, pixels, scale: 1.0, anchor: [0.5, 0.5], kind: Kind::Colour })
+        Some(Symbol { width, height, pixels, scale: 1.0, anchor: [0.5, 0.5], kind: Kind::Colour, markup: None })
+    }
+
+    /// A symbol rasterized from SVG `markup`, its longest side `size` drawn
+    /// pixels at `scale` image pixels each, anchored at its centre. Its root
+    /// fills the image, stretched if rounding to whole pixels changed its
+    /// aspect. `kind` decides what the markup's `currentColor` is: white for
+    /// a mask, black for a colour symbol. An error for a size or scale that
+    /// isn't positive, markup `usvg` can't parse, or an image larger than
+    /// [`ATLAS_MAX`].
+    #[cfg(feature = "symbols")]
+    pub fn from_svg(markup: &str, size: f32, scale: f32, kind: Kind) -> Result<Symbol, String> {
+        use resvg::tiny_skia;
+        if !(size.is_finite() && size > 0.0 && scale.is_finite() && scale > 0.0) {
+            return Err(format!("an SVG symbol needs a positive size and scale, not {size} and {scale}"));
+        }
+        let mut options = usvg::Options::default();
+        // Nazca reads no files: an image naming one draws nothing.
+        options.image_href_resolver.resolve_string = Box::new(|_, _| None);
+        if kind == Kind::Mask {
+            options.style_sheet = Some("* { color: white }".into());
+        }
+        let tree = usvg::Tree::from_str(markup, &options).map_err(|e| format!("SVG markup nazca can't read: {e}"))?;
+        let [w, h] = [tree.size().width(), tree.size().height()];
+        let k = size * scale / w.max(h);
+        let [pw, ph] = [w, h].map(|side| ((side * k).round() as u32).max(1));
+        if pw > ATLAS_MAX || ph > ATLAS_MAX {
+            return Err(format!("an SVG symbol of {pw} x {ph} pixels can't fit an atlas of {ATLAS_MAX} x {ATLAS_MAX}"));
+        }
+        let mut pixmap = tiny_skia::Pixmap::new(pw, ph).ok_or("an SVG symbol's pixmap couldn't be made")?;
+        resvg::render(&tree, tiny_skia::Transform::from_scale(pw as f32 / w, ph as f32 / h), &mut pixmap.as_mut());
+        let pixels = pixmap.pixels().iter().flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        });
+        let mut write = usvg::WriteOptions { indent: usvg::Indent::None, attributes_indent: usvg::Indent::None, ..Default::default() };
+        write.id_prefix = Some(format!("s{:016x}-", fnv1a(tree.to_string(&write).as_bytes())));
+        let svg = tree.to_string(&write).trim_end().to_string();
+        Ok(Symbol { width: pw, height: ph, pixels: pixels.collect(), scale, anchor: [0.5, 0.5], kind, markup: Some(Markup { svg, size: [w, h] }) })
     }
 
     pub fn width(&self) -> u32 {
@@ -99,6 +162,19 @@ impl Symbol {
     pub fn sharp_px(&self) -> f32 {
         self.width.max(self.height) as f32 / self.scale
     }
+
+    /// The markup it was rasterized from, for the SVG writer: only one built
+    /// by `Symbol::from_svg` has it.
+    pub(crate) fn markup(&self) -> Option<&Markup> {
+        self.markup.as_ref()
+    }
+}
+
+/// FNV-1a, 64 bits: a hash fixed across Rust versions, as `std`'s is not, so
+/// a symbol's ids are the same in every build.
+#[cfg(feature = "symbols")]
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// Where an image lies in the atlas, in atlas pixels, padding not included.
@@ -414,6 +490,55 @@ mod tests {
         assert_eq!(again, SymbolId(4));
         assert_eq!(s.get(first), None);
         check_layout(&s);
+    }
+
+    #[cfg(feature = "symbols")]
+    #[test]
+    fn an_svg_symbol_is_its_pixels_and_usvgs_rewrite() {
+        let red = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12"><rect width="24" height="12" fill="red"/></svg>"#;
+        // Longest side 8 drawn pixels at 2 image pixels each.
+        let s = Symbol::from_svg(red, 8.0, 2.0, Kind::Colour).unwrap();
+        assert_eq!((s.width(), s.height(), s.scale, s.anchor), (16, 8, 2.0, [0.5, 0.5]));
+        assert!(s.pixels().chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+        let markup = s.markup().unwrap();
+        assert_eq!(markup.size, [24.0, 12.0]);
+        assert!(markup.svg.starts_with(r#"<svg width="24" height="12" xmlns="http://www.w3.org/2000/svg">"#), "{}", markup.svg);
+        assert!(Symbol::new(1, 1, vec![0; 4]).unwrap().markup().is_none());
+    }
+
+    #[cfg(feature = "symbols")]
+    #[test]
+    fn an_svg_symbols_markup_keeps_only_what_it_draws() {
+        let icon = r#"<?xml version="1.0"?><!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>.c{opacity:0.5}</style><path class="c" fill="currentColor" d="M0 0H10V10Z"/><image href="icon.png" width="5" height="5"/><text x="1" y="9">hi</text><script>alert(1)</script></svg>"#;
+        let colour = Symbol::from_svg(icon, 10.0, 1.0, Kind::Colour).unwrap();
+        let svg = &colour.markup().unwrap().svg;
+        for gone in ["<?xml", "DOCTYPE", "<style", "<image", "<text", "<script", "icon.png"] {
+            assert!(!svg.contains(gone), "{gone} in {svg}");
+        }
+        // The style sheet applied, and currentColor black for a colour symbol,
+        // white for a mask, in the markup and the pixels alike.
+        assert!(svg.contains(r##"<g opacity="0.5"><path fill="#000000""##), "{svg}");
+        let mask = Symbol::from_svg(icon, 10.0, 1.0, Kind::Mask).unwrap();
+        assert!(mask.markup().unwrap().svg.contains(r##"fill="#ffffff""##), "{:?}", mask.markup());
+        // Top right, inside the triangle.
+        assert_eq!(&colour.pixels()[9 * 4 + 40..][..4], &[0, 0, 0, 128]);
+        assert_eq!(&mask.pixels()[9 * 4 + 40..][..4], &[255, 255, 255, 128]);
+    }
+
+    #[cfg(feature = "symbols")]
+    #[test]
+    fn an_svg_symbol_can_be_refused() {
+        let square = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>"#;
+        for (size, scale) in [(0.0, 1.0), (10.0, -1.0), (f32::NAN, 1.0), (10.0, f32::INFINITY)] {
+            assert!(Symbol::from_svg(square, size, scale, Kind::Colour).is_err(), "{size} {scale}");
+        }
+        assert!(Symbol::from_svg("<svg", 10.0, 1.0, Kind::Colour).is_err());
+        let err = Symbol::from_svg(square, 1100.0, 2.0, Kind::Colour).unwrap_err();
+        assert!(err.contains("2200 x 2200"), "{err}");
+        // Rounding never leaves a side empty.
+        let thin = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="1"/>"#;
+        let s = Symbol::from_svg(thin, 10.0, 1.0, Kind::Colour).unwrap();
+        assert_eq!((s.width(), s.height()), (10, 1));
     }
 
     #[test]
