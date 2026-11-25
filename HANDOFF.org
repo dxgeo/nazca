@@ -8,7 +8,9 @@ Written 2026-11-25, on the =custom-symbols= branch. What is open lives in
 
 ** WHERE IT STANDS
 Custom symbols' steps 0 to 6 are built and committed on =custom-symbols=,
-which is prepared as 0.3.0 and pushed with a pull request into =main=:
+which is prepared as 0.3.0 and pushed with a pull request into =main=.
+Step 7, vector symbols, joins 0.3.0 (decided 2026-11-25), so the pull
+request waits for it:
 
 - *Step 0*: nazca's own =gl::Context=.
 - *Step 1*: symbols, the atlas and the 256 x 7 palette.
@@ -61,6 +63,9 @@ which is prepared as 0.3.0 and pushed with a pull request into =main=:
 the runs and numbers.
 
 ** NEXT SESSION
+- *Step 7, vector symbols*, in 0.3.0 before the pull request merges
+  (plans/custom-symbols.org § Later: vector symbols, § STEPS 7, § OPEN
+  QUESTIONS 7), then the README and the release notes for it.
 - *Merge* the pull request into =main= (the user's step).
 - *Tag* =v0.3.0= on =main=, its message the release notes in the pull
   request's description, as =v0.2.1='s tag carries its notes, and
@@ -68,8 +73,8 @@ the runs and numbers.
 - *Optional, before publishing*: =[package.metadata.docs.rs]
   all-features = true=, so docs.rs shows =gl=, =symbols=, =mvt= and =mlt=;
   it builds only the default features now.
-- After 0.3.0: remove gl-context.org and custom-symbols.org's steps 0 to 6
-  from plans/todo.org; step 7, vector symbols, waits on § OPEN QUESTIONS 7.
+- After 0.3.0: remove gl-context.org and custom-symbols.org from
+  plans/todo.org.
 
 ** ALSO OPEN
 - *Darker dots at a translucent line's vertices.* Each segment's round end

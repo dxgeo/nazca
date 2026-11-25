@@ -25,8 +25,10 @@ patterns are byte-identical to step 3's. Step 5, =Symbol::from_svg= and
 its markup in SVG output, is built (2026-11-24) and checked natively, in
 =resvg= and in Chrome, its markers in Chrome's WebGL2; the spike's views
 without markup are byte-identical to step 4's. Step 6, the README and
-0.3.0, is written (2026-11-25), to be merged, tagged and published. Step 7, vector symbols, waits on
-§ OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
+0.3.0, is written (2026-11-25). Step 7, vector symbols, is in 0.3.0 too,
+decided 2026-11-25 (user decision): the pull request into =main= waits for
+it, and step 6's README and release notes gain it. It waits on § OPEN
+QUESTIONS 7. § STEPS builds one kind of
 symbol at a time. Markers, dashes and pattern fills are three parts that
 share an atlas and a palette layout, so each can be built once the shared
 step is in.
@@ -512,10 +514,11 @@ It also lets an embedder build symbols from data rather than images.
     uploads images, and a =point_size= on a zoom curve rasterizes again as
     the camera zooms unless sizes are bucketed.
 
-Not in the first release: the pixel route draws these symbols already (an
-embedder rasterizes them, or uses =Symbol::from_svg=), and this kind is
-worth its parser and instancing once a symbol has to stay sharp past the
-size it was drawn at, or is built from data.
+Written as not in the first release: the pixel route draws these symbols
+already (an embedder rasterizes them, or uses =Symbol::from_svg=), and this
+kind is worth its parser and instancing once a symbol has to stay sharp
+past the size it was drawn at, or is built from data. Decided 2026-11-25
+(user decision): in 0.3.0, before it merges.
 
 *** SVG output
 - *=SvgWriter::symbols(&Symbols)=* before the layers that use them. Each
@@ -754,7 +757,8 @@ Ruled out:
 7. *Later, vector symbols*: parts from path data (the parser and
    flattening) and from a =Sink=, literal and slot paint, the instanced
    symbol mesh, picking by shape, the caps, the antialiased edge as § OPEN
-   QUESTIONS 7 settles, =<symbol>= output per class. A release of its own.
+   QUESTIONS 7 settles, =<symbol>= output per class. In 0.3.0, decided
+   2026-11-25 (user decision), where it was a release of its own.
 
 ** CHECKS
 - *Packing*: unit tests in =symbol.rs=. Ids stay stable across adds and a
