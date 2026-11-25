@@ -140,6 +140,9 @@ earcut), the tile cache, the camera with its tile-selection trait, the
 colormapped and mesh-warped rasters, ID-buffer picking), the MVT and MLT
 decoders, zoom-dependent styles and the SVG backend, with a layout example
 (plans/rendering.org § V1 SLICE) -- and the spike drawing and picking counties
-tile by tile through them, natively and in a browser. See
+tile by tile through them, natively and in a browser. Since: picking and SVG
+through feature state (0.2.1, plans/state-picking.org), and nazca's own GL
+context with markers, dashes and pattern fills from embedder-supplied
+symbols (0.3.0, plans/gl-context.org, plans/custom-symbols.org). See
 [[file:plans/rendering.org][plans/rendering.org]] and
 [[file:plans/todo.org][plans/todo.org]].

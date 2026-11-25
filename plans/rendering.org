@@ -145,7 +145,7 @@ set, so decimation barely shows on it (79% of points kept at level 3); a
 Fine levels emit more vertices than they read (148% at level 9): clipping
 adds points where borders cross tile edges, and each tile keeps its own.
 
-/Distances and shared borders, 2026-11-23 (unreleased, for 0.3.0;
+/Distances and shared borders, 2026-11-23 (0.3.0;
 plans/custom-symbols.org § Dashes):/ each vertex also carries its distance
 along its line or ring (=Mesh::distances=), measured before clipping, for
 dashes; and =finish= matches ring edges that two rings share, so a shared
@@ -248,7 +248,7 @@ read by =texelFetch=; =update_palette= restyles in one upload. Visibility
 and min/max zoom are the embedder's for now: it chooses which layers to
 draw.
 
-/Symbols, 2026-11-21 (unreleased, for 0.3.0):/ =Style= gains a marker, a
+/Symbols, 2026-11-21 (0.3.0):/ =Style= gains a marker, a
 dash and a pattern, each naming a symbol by id from a =Symbols= atlas
 (=src/symbol.rs=), and is =#[non_exhaustive]=: an embedder builds one from
 =Style::default()= and assigns. The palette texture is 256 x 7. The design
@@ -469,7 +469,7 @@ plans/custom-symbols.org) and =text= (glyphs; § LABELS).
   gives round caps and joins with no neighbour information. Points are the
   same quad around a zero-length segment: a dot of =point_size= in the fill
   colour.
-- *Points*, since 2026-11-21 (unreleased, for 0.3.0): a program of their
+- *Points*, since 2026-11-21 (0.3.0): a program of their
   own draws the same dot, or the class's marker, a symbol from the
   renderer's atlas (plans/custom-symbols.org § Markers).
 - *Each pixel belongs to one tile*, by stencil: a tile *claims* its square's

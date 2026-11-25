@@ -9,11 +9,11 @@ Design notes, one self-contained plan per file, ordered by dependency.
   backends, globe, v1 features and the v1 slice (2026-10-29).
 - [[file:gl-context.org][gl-context.org]] -- the GL context: taking =glow=
   out of the =gl= API, and what removing it outright would take
-  (2026-11-10; step 1 built for 0.3.0, unreleased).
+  (2026-11-10; step 1 built, in 0.3.0).
 - [[file:state-picking.org][state-picking.org]] -- picking and SVG through
   feature state, so a layer drawn only through a state picks and exports what
   is on screen (2026-11-16, built in 0.2.1).
 - [[file:custom-symbols.org][custom-symbols.org]] -- markers, dashed lines
   and pattern fills from embedder-supplied symbols, on screen, in picks and
-  in SVG (2026-11-19; steps 0 to 6 decided for 0.3.0, steps 0 to 3
-  built, with step 3's two additions).
+  in SVG (2026-11-19; steps 0 to 6 built, in 0.3.0; vector symbols, step
+  7, later).

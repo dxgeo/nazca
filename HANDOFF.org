@@ -2,13 +2,13 @@
 #+AUTHOR: Daniel Okuniewicz Jr.
 
 * Handoff
-Written 2026-11-24, on the =custom-symbols= branch. What is open lives in
+Written 2026-11-25, on the =custom-symbols= branch. What is open lives in
 [[file:plans/todo.org][plans/todo.org]], and why each piece is shaped the way it is lives in
 [[file:plans/custom-symbols.org][plans/custom-symbols.org]], the plan this branch builds for 0.3.0.
 
 ** WHERE IT STANDS
-Custom symbols' steps 0 to 5 are built and committed on =custom-symbols=,
-unreleased:
+Custom symbols' steps 0 to 6 are built and committed on =custom-symbols=,
+which is prepared as 0.3.0 and pushed with a pull request into =main=:
 
 - *Step 0*: nazca's own =gl::Context=.
 - *Step 1*: symbols, the atlas and the 256 x 7 palette.
@@ -51,26 +51,38 @@ unreleased:
   =raster-images= on, so any static SVG can be a symbol (§ OPEN QUESTIONS
   1).
 
+- *Step 6*, 2026-11-25: the README's symbols section, its layout example
+  built from =Style::default()= by assignment, an interactive-map example
+  building a =gl::Context=; its three examples type-checked against the
+  API. The version is 0.3.0 in =Cargo.toml=, the lockfiles and the
+  README, and the plans' and =project.org='s status say 0.3.0.
+
 § CHECKS (/Dashes/, /A far line start/, /Patterns/, /Markup/, /Cost/) has
 the runs and numbers.
 
 ** NEXT SESSION
-- *Step 6*: the README's symbols section and the 0.3.0 release
-  (§ STEPS 6).
+- *Merge* the pull request into =main= (the user's step).
+- *Tag* =v0.3.0= on =main=, its message the release notes in the pull
+  request's description, as =v0.2.1='s tag carries its notes, and
+  *publish* to crates.io. Both are public; ask first.
+- *Optional, before publishing*: =[package.metadata.docs.rs]
+  all-features = true=, so docs.rs shows =gl=, =symbols=, =mvt= and =mlt=;
+  it builds only the default features now.
+- After 0.3.0: remove gl-context.org and custom-symbols.org's steps 0 to 6
+  from plans/todo.org; step 7, vector symbols, waits on § OPEN QUESTIONS 7.
 
 ** ALSO OPEN
 - *Darker dots at a translucent line's vertices.* Each segment's round end
   overlaps the next one's, so the line blends twice there. This is a known
   limit, in plans/rendering.org § BACKENDS, from before this branch and
   separate from step 3.
-- The 0.3.0 release notes cover the =update_palette= change with the two
-  breaks.
 
 ** RUNNING THINGS
 - Native: =cargo run --release --features gl,symbols --example spike=. Add
   =-- --outlines dashed= to start dashed. D cycles the outlines, P the
-  patterns, M the markers (colour, mask, markup), H hovers the county picked last, and =--check-dashes= and
-  =--check-patterns= run their checks and exit.
+  patterns, M the markers (colour, mask, markup), H hovers the county
+  picked last, and =--check-dashes= and =--check-patterns= run their checks
+  and exit.
 - Browser: =cd spike-web && wasm-pack build --target web --release=, then
   =python3 -m http.server= there and open the page. X runs the dash check
   and T the pattern check, each logging its report to the console.

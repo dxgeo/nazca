@@ -6,8 +6,8 @@
 
 ** STATUS -- step 1 decided 2026-11-20 (user decision), built 2026-11-20
 Written 2026-11-10, checked against 0.2.1 2026-11-17. Step 1 is built, as
-step 0 of plans/custom-symbols.org, and unreleased: its break ships in 0.3.0
-with that plan's. § THE PROBLEM and § WHAT GLOW DOES FOR NAZCA describe
+step 0 of plans/custom-symbols.org, and its break ships in 0.3.0 with
+that plan's. § THE PROBLEM and § WHAT GLOW DOES FOR NAZCA describe
 0.2.1. Step 2 is left until a reason for it appears; it is written
 down so that, if it is ever wanted, step 1 has already made it an internal
 change. § OPEN QUESTIONS records the answers.

@@ -24,7 +24,8 @@ Chrome's WebGL2 (=--check-patterns=, T in the browser); the spike's views withou
 patterns are byte-identical to step 3's. Step 5, =Symbol::from_svg= and
 its markup in SVG output, is built (2026-11-24) and checked natively, in
 =resvg= and in Chrome, its markers in Chrome's WebGL2; the spike's views
-without markup are byte-identical to step 4's. Step 6 is next. Step 7, vector symbols, waits on
+without markup are byte-identical to step 4's. Step 6, the README and
+0.3.0, is written (2026-11-25), to be merged, tagged and published. Step 7, vector symbols, waits on
 § OPEN QUESTIONS 7 and is a release of its own. § STEPS builds one kind of
 symbol at a time. Markers, dashes and pattern fills are three parts that
 share an atlas and a palette layout, so each can be built once the shared
@@ -743,7 +744,9 @@ Ruled out:
    what SVG output writes; its palette
    example built from =Style::default()= by assignment; its setup building
    a =gl::Context= in place of a =glow= one) and *a release*, 0.3.0 as
-   § OPEN QUESTIONS 6 says, its notes covering both breaks.
+   § OPEN QUESTIONS 6 says, its notes covering both breaks. The README
+   written 2026-11-25, its three examples type-checked against the API, and
+   the version set to 0.3.0.
 7. *Later, vector symbols*: parts from path data (the parser and
    flattening) and from a =Sink=, literal and slot paint, the instanced
    symbol mesh, picking by shape, the caps, the antialiased edge as § OPEN
