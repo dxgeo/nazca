@@ -64,8 +64,14 @@ External crates are allowed; sibling crates are not (that would be an edge,
 - *The default build is standard-library only*: WKB reading, the geometry
   sink, preparation, the tile cache, the camera, hit-test bookkeeping, the
   draw-command buffer and the SVG backend.
-- *Heavier parts sit behind features*: =gl= (=glow=), =raster= (=tiny-skia=),
-  =text= (a small glyph rasterizer such as =ab_glyph= or =fontdue=).
+- *Heavier parts sit behind features*: =gl= (=glow=, and =web-sys='s
+  WebGL2 context type in a browser), =symbols= (=resvg= and =usvg=, fonts
+  off: icons from SVG markup, plans/custom-symbols.org), =raster=
+  (=tiny-skia=), =text= (a small glyph rasterizer such as =ab_glyph= or
+  =fontdue=).
+- *=glow= is not part of the API* (since 0.3.0, plans/gl-context.org): the
+  =gl= backend takes nazca's own =gl::Context=, so an embedder needs no
+  =glow= and a =glow= upgrade is not a breaking change to nazca.
 - *=mvt= and =mlt= are features too, with no dependency*: small hand-written
   decoders for third-party basemaps in either vector tile encoding
   (plans/rendering.org § V1 FEATURES).
@@ -134,6 +140,9 @@ earcut), the tile cache, the camera with its tile-selection trait, the
 colormapped and mesh-warped rasters, ID-buffer picking), the MVT and MLT
 decoders, zoom-dependent styles and the SVG backend, with a layout example
 (plans/rendering.org § V1 SLICE) -- and the spike drawing and picking counties
-tile by tile through them, natively and in a browser. See
+tile by tile through them, natively and in a browser. Since: picking and SVG
+through feature state (0.2.1, plans/state-picking.org), and nazca's own GL
+context with markers, dashes and pattern fills from embedder-supplied
+symbols (0.3.0, plans/gl-context.org, plans/custom-symbols.org). See
 [[file:plans/rendering.org][plans/rendering.org]] and
 [[file:plans/todo.org][plans/todo.org]].

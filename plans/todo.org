@@ -10,6 +10,8 @@ shelved.
 The v1 slice is built.
 
 - [ ] [[file:gl-context.org][gl-context.org]] -- a nazca-owned GL context
-  type, awaiting a decision (§ OPEN QUESTIONS).
+  type, step 1 built as custom-symbols' step 0; ships with 0.3.0.
 - [ ] [[file:custom-symbols.org][custom-symbols.org]] -- markers, dashes and
-  pattern fills, awaiting decisions (§ OPEN QUESTIONS).
+  pattern fills, steps 0 to 6 built with gl-context.org's step 1 as 0.3.0;
+  next, step 7, vector symbols, also in 0.3.0, then merging, tagging and
+  publishing it (../HANDOFF.org).

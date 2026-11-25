@@ -25,6 +25,24 @@
 //! both indices into the same vertex buffer, and each vertex carries the
 //! feature's style class.
 //!
+//! Each vertex also carries its *distance* along its line or ring
+//! ([`Mesh::distances`]), measured along the snapped and decimated geometry
+//! before clipping, so a dash pattern follows the line handed in rather than
+//! restarting where nazca clipped it. A line handed in as pieces starts each
+//! from [`MeshBuilder::set_line_start`], measured by
+//! [`MeshBuilder::line_length`] so the pieces join exactly. Distances are
+//! `f64`, so a vertex far along a long line keeps its place in the pattern.
+//!
+//! *A border two rings share is drawn once* ([`Mesh::partners`]). Each ring
+//! outlines it, running it its own way from its own start, so drawn twice it
+//! would be two dash patterns out of phase, and a translucent line would blend
+//! twice. When the mesh is finished, ring edges that overlap along one line of
+//! the grid are split at each other's ends, so the pieces pair one to one, and
+//! the earlier piece of each pair names the later. A backend draws the earlier
+//! only where the later isn't drawn: hidden by a state, or in a class with no
+//! line. Matched by overlap rather than by equal ends, since one county's
+//! straight edge often meets two neighbours' at a T-junction.
+//!
 //! Culling whole features before decoding them needs a bounding box the
 //! source already stores (a GeoPackage envelope, a GeoParquet covering
 //! column, a FlatGeobuf index): the caller skips those features rather than
@@ -33,6 +51,7 @@
 use crate::earcut::Earcut;
 use crate::grid::{TileFrame, TileGrid, TileId};
 use crate::sink::Sink;
+use std::collections::HashMap;
 use std::ops::Range;
 
 /// How finely a tile is prepared.
@@ -55,6 +74,7 @@ impl Default for Detail {
 }
 
 /// Draw-ready geometry in one tile's local coordinates.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mesh {
     /// The frame the vertices are relative to.
@@ -77,9 +97,39 @@ pub struct Mesh {
     /// One per vertex: the feature it belongs to, as
     /// [`MeshBuilder::set_feature`] set it. What picking returns.
     pub ids: Vec<u32>,
+    /// Empty, or one per vertex: how far along its line or ring it lies, in
+    /// local units, where dash patterns are measured from. Empty reads as 0
+    /// throughout. `f64`, since a vertex thousands of kilometres along its
+    /// line at a deep level is millions of pixels along, past what an `f32`
+    /// holds to a pixel.
+    pub distances: Vec<f64>,
+    /// Empty, or one per outline segment: the later segment, by its index
+    /// into `outlines` pairs, that draws the same stretch of a border two
+    /// rings share, or [`Mesh::NO_PARTNER`]. A segment is drawn only where
+    /// its partner isn't. Empty when no border is shared.
+    pub partners: Vec<u32>,
 }
 
 impl Mesh {
+    /// A segment's partner when it has none.
+    pub const NO_PARTNER: u32 = u32::MAX;
+
+    /// An empty mesh in `frame`, for an embedder building one by hand.
+    pub fn new(frame: TileFrame) -> Mesh {
+        Mesh {
+            frame,
+            vertices: Vec::new(),
+            fills: Vec::new(),
+            outlines: Vec::new(),
+            points: Vec::new(),
+            rings: Vec::new(),
+            polygons: Vec::new(),
+            ids: Vec::new(),
+            distances: Vec::new(),
+            partners: Vec::new(),
+        }
+    }
+
     pub fn vertex_count(&self) -> usize {
         self.vertices.len() / 3
     }
@@ -88,7 +138,18 @@ impl Mesh {
     /// size to give [`crate::TileCache::insert`].
     pub fn byte_size(&self) -> usize {
         4 * (self.vertices.len() + self.fills.len() + self.outlines.len() + self.points.len() + self.ids.len())
-            + 8 * (self.rings.len() + self.polygons.len())
+            + 4 * self.partners.len()
+            + 8 * (self.distances.len() + self.rings.len() + self.polygons.len())
+    }
+
+    /// Vertex `i`'s distance along its line or ring.
+    pub(crate) fn distance(&self, i: u32) -> f64 {
+        self.distances.get(i as usize).copied().unwrap_or(0.0)
+    }
+
+    /// Outline segment `k`'s partner, if it has one.
+    pub(crate) fn partner(&self, k: usize) -> Option<usize> {
+        self.partners.get(k).filter(|&&p| p != Mesh::NO_PARTNER).map(|&p| p as usize)
     }
 }
 
@@ -108,16 +169,32 @@ pub struct MeshBuilder {
     half_cells: f64,
     /// The clip square's half-width, in grid steps.
     clip: f64,
-    // The polygon being received, in grid coordinates.
+    // The polygon being received, in grid coordinates, and each kept ring
+    // point's distance along its ring, in grid steps.
     pts: Vec<[f64; 2]>,
+    dists: Vec<f64>,
     rings: Vec<Range<usize>>,
     ring_start: usize,
     rings_seen: usize,
-    // The line being received, if any, in grid coordinates.
+    // The line being received, if any, in grid coordinates, where it starts
+    // along the whole line, and its points' distances.
     line: Option<Vec<[f64; 2]>>,
+    line_start: f64,
+    line_dists: Vec<f64>,
     scratch: [Vec<[f64; 2]>; 2],
+    ring_scratch: [Vec<[f64; 3]>; 2],
     earcut: Earcut,
     tris: Vec<u32>,
+    // Every outlined ring edge so far, for `share_borders`.
+    ring_edges: Vec<RingEdge>,
+}
+
+/// An outlined ring edge, in grid coordinates, and its segment's index
+/// among the outline pairs.
+struct RingEdge {
+    a: [i64; 2],
+    b: [i64; 2],
+    segment: usize,
 }
 
 impl MeshBuilder {
@@ -130,28 +207,24 @@ impl MeshBuilder {
         let half_cells = cells / 2.0;
         let clip = half_cells + (detail.guard_px / detail.grid_px).round().max(0.0);
         MeshBuilder {
-            mesh: Mesh {
-                frame,
-                vertices: Vec::new(),
-                fills: Vec::new(),
-                outlines: Vec::new(),
-                points: Vec::new(),
-                rings: Vec::new(),
-                polygons: Vec::new(),
-                ids: Vec::new(),
-            },
+            mesh: Mesh::new(frame),
             class: 0.0,
             feature: 0,
             half_cells,
             clip,
             pts: Vec::new(),
+            dists: Vec::new(),
             rings: Vec::new(),
             ring_start: 0,
             rings_seen: 0,
             line: None,
+            line_start: 0.0,
+            line_dists: Vec::new(),
             scratch: [Vec::new(), Vec::new()],
+            ring_scratch: [Vec::new(), Vec::new()],
             earcut: Earcut::new(),
             tris: Vec::new(),
+            ring_edges: Vec::new(),
         }
     }
 
@@ -188,7 +261,47 @@ impl MeshBuilder {
         self.feature = id;
     }
 
-    pub fn finish(self) -> Mesh {
+    /// Where the next line's first vertex lies along the whole line it is a
+    /// piece of, in map units, so a dash pattern runs on from the piece
+    /// before. For the next line only; the one after starts at 0 again.
+    ///
+    /// The seam joins exactly when `distance` is the pieces before measured
+    /// by [`MeshBuilder::line_length`], summed. Measured on the source's own
+    /// geometry it is only as close as that is to nazca's measure, which
+    /// runs along the line as snapped and decimated at this tile's level:
+    /// snapping drops the wiggles finer than its grid and moves every
+    /// vertex, so on a line of many short segments the two part at any zoom,
+    /// and the seam jumps by the difference. A line handed whole to every
+    /// tile needs no start.
+    pub fn set_line_start(&mut self, distance: f64) {
+        self.line_start = distance / self.mesh.frame.half_span * self.half_cells;
+    }
+
+    /// The length of the line through `xy`, in map units, as this builder
+    /// measures it: along the line snapped to its grid and decimated, as
+    /// [`Sink::points`] would take it. The pieces of a longer line, each
+    /// measured so, give the next piece's start for
+    /// [`MeshBuilder::set_line_start`], and the pattern runs on across the
+    /// seam as if the line were handed in whole.
+    ///
+    /// The grid is fixed in map units for a level, so every tile at a level
+    /// measures a line alike: a piece may be measured by a builder for any
+    /// of them, once for the level. They part only for a point within
+    /// rounding of halfway between two grid points, which each tile's own
+    /// arithmetic may snap its own way.
+    pub fn line_length(&self, xy: &[[f64; 2]]) -> f64 {
+        let mut line = Vec::with_capacity(xy.len());
+        for &p in xy {
+            push_decimated(&mut line, 0, self.snap(p));
+        }
+        let steps = line.windows(2).fold(0.0, |d, w| d + (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]));
+        steps / self.half_cells * self.mesh.frame.half_span
+    }
+
+    /// The mesh, with the borders its rings share matched (see the module
+    /// docs).
+    pub fn finish(mut self) -> Mesh {
+        self.share_borders();
         self.mesh
     }
 
@@ -202,11 +315,14 @@ impl MeshBuilder {
         p[0].abs() <= self.clip && p[1].abs() <= self.clip
     }
 
-    fn push_vertex(&mut self, g: [f64; 2]) -> u32 {
+    /// Adds a vertex at grid point `g`, `d` grid steps along its line or
+    /// ring.
+    fn push_vertex(&mut self, g: [f64; 2], d: f64) -> u32 {
         let index = self.mesh.vertex_count() as u32;
         let s = self.half_cells;
         self.mesh.vertices.extend_from_slice(&[(g[0] / s) as f32, (g[1] / s) as f32, self.class]);
         self.mesh.ids.push(self.feature);
+        self.mesh.distances.push(d / s);
         index
     }
 
@@ -217,54 +333,172 @@ impl MeshBuilder {
         (a[0] == b[0] && a[0].abs() == c) || (a[1] == b[1] && a[1].abs() == c)
     }
 
-    /// Clips the ring `pts[start..]` to the clip square in place.
-    fn clip_ring(&mut self, start: usize) {
-        let [mut a, mut b] = std::mem::take(&mut self.scratch);
+    /// Clips the ring `pts[start..]`, `length` grid steps around, to the
+    /// clip square in place, its points carrying their distances through.
+    fn clip_ring(&mut self, start: usize, length: f64) {
+        let [mut a, mut b] = std::mem::take(&mut self.ring_scratch);
         a.clear();
-        a.extend_from_slice(&self.pts[start..]);
+        a.extend(self.pts[start..].iter().zip(&self.dists[start..]).map(|(p, &d)| [p[0], p[1], d]));
         let c = self.clip;
         for (axis, bound, keep_greater) in [(0, -c, true), (0, c, false), (1, -c, true), (1, c, false)] {
-            clip_edge(&a, &mut b, axis, bound, keep_greater);
+            clip_edge(&a, &mut b, axis, bound, keep_greater, length);
             std::mem::swap(&mut a, &mut b);
             if a.is_empty() {
                 break;
             }
         }
-        self.pts.truncate(start);
+        b.clear();
         for &p in &a {
-            push_decimated(&mut self.pts, start, p);
+            push_decimated(&mut b, 0, p);
         }
-        self.scratch = [a, b];
+        self.pts.truncate(start);
+        self.dists.truncate(start);
+        self.pts.extend(b.iter().map(|p| [p[0], p[1]]));
+        self.dists.extend(b.iter().map(|p| p[2]));
+        self.ring_scratch = [a, b];
     }
 
-    fn end_line_run(&mut self, line: &[[f64; 2]]) {
+    /// Outlines `line`, whose points lie `dists` grid steps along it, in
+    /// runs clipped to the clip square.
+    fn end_line_run(&mut self, line: &[[f64; 2]], dists: &[f64]) {
         // The index of the last vertex, while the line runs on inside.
         let mut prev: Option<u32> = None;
-        for w in line.windows(2) {
+        for (i, w) in line.windows(2).enumerate() {
             let Some((p, q)) = clip_segment(w[0], w[1], self.clip) else {
                 prev = None;
                 continue;
             };
+            let along = |p: [f64; 2]| dists[i] + (p[0] - w[0][0]).hypot(p[1] - w[0][1]);
             let from = match prev {
-                Some(i) if p == w[0] => i,
-                _ => self.push_vertex(p),
+                Some(v) if p == w[0] => v,
+                _ => self.push_vertex(p, along(p)),
             };
-            let to = self.push_vertex(q);
+            let to = self.push_vertex(q, along(q));
             self.mesh.outlines.extend_from_slice(&[from, to]);
             prev = (q == w[1]).then_some(to);
         }
     }
+
+    /// Matches the borders the mesh's rings share (see the module docs):
+    /// groups the outlined ring edges by the line of the grid they lie on,
+    /// splits those that overlap another at every end of one inside them,
+    /// and pairs each piece with the next one, in feed order, over the same
+    /// stretch.
+    fn share_borders(&mut self) {
+        let edges = std::mem::take(&mut self.ring_edges);
+        // A line of the grid: its direction, primitive and pointing right
+        // (or up), and the cross product every point on it shares.
+        let mut lines: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
+        for (n, e) in edges.iter().enumerate() {
+            let [ux, uy] = direction(e.a, e.b);
+            lines.entry([ux, uy, ux * e.a[1] - uy * e.a[0]]).or_default().push(n);
+        }
+        // Each edge to split: its line, and the positions along it from its
+        // start to its end.
+        let mut plan: HashMap<usize, ([i64; 3], Vec<i64>)> = HashMap::new();
+        let mut ends = Vec::new();
+        for (&line, members) in &lines {
+            if members.len() < 2 {
+                continue;
+            }
+            let along = |p: [i64; 2]| line[0] * p[0] + line[1] * p[1];
+            ends.clear();
+            ends.extend(members.iter().flat_map(|&n| [along(edges[n].a), along(edges[n].b)]));
+            ends.sort_unstable();
+            ends.dedup();
+            for &n in members {
+                let (ta, tb) = (along(edges[n].a), along(edges[n].b));
+                let inside = ends.iter().copied().filter(|&t| t > ta.min(tb) && t < ta.max(tb));
+                let mut cuts: Vec<i64> = std::iter::once(ta).chain(inside).chain(std::iter::once(tb)).collect();
+                if ta > tb {
+                    let last = cuts.len() - 1;
+                    cuts[1..last].reverse();
+                }
+                plan.insert(edges[n].segment, (line, cuts));
+            }
+        }
+        if plan.is_empty() {
+            return;
+        }
+
+        let old = std::mem::take(&mut self.mesh.outlines);
+        let mut outlines = Vec::with_capacity(old.len());
+        let mut stretches: HashMap<[i64; 5], Vec<u32>> = HashMap::new();
+        let mut edge_of = edges.iter().map(|e| (e.segment, e)).collect::<HashMap<_, _>>();
+        for (k, s) in old.chunks_exact(2).enumerate() {
+            let Some((line, cuts)) = plan.get(&k) else {
+                outlines.extend_from_slice(s);
+                continue;
+            };
+            let e = edge_of.remove(&k).unwrap();
+            let step = line[0] * line[0] + line[1] * line[1];
+            let t0 = cuts[0];
+            let mut from = s[0];
+            for j in 1..cuts.len() {
+                let to = if j + 1 == cuts.len() {
+                    s[1]
+                } else {
+                    let m = (cuts[j] - t0) / step;
+                    self.split_vertex(s[0], e.a, [e.a[0] + m * line[0], e.a[1] + m * line[1]])
+                };
+                let stretch = [line[0], line[1], line[2], cuts[j - 1].min(cuts[j]), cuts[j - 1].max(cuts[j])];
+                stretches.entry(stretch).or_default().push((outlines.len() / 2) as u32);
+                outlines.extend_from_slice(&[from, to]);
+                from = to;
+            }
+        }
+        self.mesh.partners = vec![Mesh::NO_PARTNER; outlines.len() / 2];
+        for pieces in stretches.values() {
+            for w in pieces.windows(2) {
+                self.mesh.partners[w[0] as usize] = w[1];
+            }
+        }
+        self.mesh.outlines = outlines;
+    }
+
+    /// A vertex at grid point `g` on the ring edge leaving vertex `from`,
+    /// which lies at grid point `a`: its feature, class and distance.
+    fn split_vertex(&mut self, from: u32, a: [i64; 2], g: [i64; 2]) -> u32 {
+        let index = self.mesh.vertex_count() as u32;
+        let f = from as usize;
+        let s = self.half_cells;
+        let class = self.mesh.vertices[f * 3 + 2];
+        let d = self.mesh.distance(from) + ((g[0] - a[0]) as f64).hypot((g[1] - a[1]) as f64) / s;
+        self.mesh.vertices.extend_from_slice(&[(g[0] as f64 / s) as f32, (g[1] as f64 / s) as f32, class]);
+        let id = self.mesh.ids[f];
+        self.mesh.ids.push(id);
+        self.mesh.distances.push(d);
+        index
+    }
+}
+
+/// The primitive direction of the grid line through `a` and `b`, pointing
+/// right, or up when the line is vertical.
+fn direction(a: [i64; 2], b: [i64; 2]) -> [i64; 2] {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let g = gcd(dx.abs(), dy.abs()).max(1);
+    let (ux, uy) = (dx / g, dy / g);
+    if ux < 0 || (ux == 0 && uy < 0) { [-ux, -uy] } else { [ux, uy] }
+}
+
+fn gcd(mut a: i64, mut b: i64) -> i64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 /// Appends `p` to the ring or line `buf[start..]`, unless it repeats the
 /// last point; and replaces the last point instead if it lies exactly on the
-/// way from the one before to `p`.
-fn push_decimated(buf: &mut Vec<[f64; 2]>, start: usize, p: [f64; 2]) {
+/// way from the one before to `p`. Only X and Y are compared; anything after
+/// them (a distance) travels with the point kept.
+fn push_decimated<const N: usize>(buf: &mut Vec<[f64; N]>, start: usize, p: [f64; N]) {
+    let xy = |q: &[f64; N]| [q[0], q[1]];
     let n = buf.len() - start;
-    if n >= 1 && buf[buf.len() - 1] == p {
+    if n >= 1 && xy(&buf[buf.len() - 1]) == xy(&p) {
         return;
     }
-    if n >= 2 && passes_through(buf[buf.len() - 2], buf[buf.len() - 1], p) {
+    if n >= 2 && passes_through(xy(&buf[buf.len() - 2]), xy(&buf[buf.len() - 1]), xy(&p)) {
         *buf.last_mut().unwrap() = p;
         return;
     }
@@ -281,16 +515,22 @@ fn passes_through(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> bool {
 
 /// One Sutherland--Hodgman pass: keeps the part of ring `input` on one side
 /// of the line `p[axis] == bound`. New points sit exactly on the line, their
-/// other coordinate snapped to the grid.
-fn clip_edge(input: &[[f64; 2]], out: &mut Vec<[f64; 2]>, axis: usize, bound: f64, keep_greater: bool) {
+/// other coordinate snapped to the grid, their distance interpolated along
+/// the edge they cut. A ring's distances rise along it but for its closing
+/// edge, which ends where the ring began, `length` along; an edge whose
+/// distance falls is taken to be that one. Edges along the clip boundary
+/// aren't outlined, so their distances are never read.
+fn clip_edge(input: &[[f64; 3]], out: &mut Vec<[f64; 3]>, axis: usize, bound: f64, keep_greater: bool, length: f64) {
     out.clear();
-    let inside = |p: [f64; 2]| if keep_greater { p[axis] >= bound } else { p[axis] <= bound };
-    let cross = |a: [f64; 2], b: [f64; 2]| {
+    let inside = |p: [f64; 3]| if keep_greater { p[axis] >= bound } else { p[axis] <= bound };
+    let cross = |a: [f64; 3], b: [f64; 3]| {
         let t = (bound - a[axis]) / (b[axis] - a[axis]);
         let other = 1 - axis;
-        let mut p = [0.0; 2];
+        let mut p = [0.0; 3];
         p[axis] = bound;
         p[other] = (a[other] + t * (b[other] - a[other])).round();
+        let end = if b[2] < a[2] { b[2] + length } else { b[2] };
+        p[2] = a[2] + t * (end - a[2]);
         p
     };
     for i in 0..input.len() {
@@ -348,7 +588,7 @@ impl Sink for MeshBuilder {
         let [x, y] = self.mesh.frame.to_local_f64(xy);
         let g = [x * self.half_cells, y * self.half_cells];
         if self.inside(g) {
-            let i = self.push_vertex(g);
+            let i = self.push_vertex(g, 0.0);
             self.mesh.points.push(i);
         }
     }
@@ -376,13 +616,25 @@ impl Sink for MeshBuilder {
 
     fn end_line(&mut self) {
         if let Some(line) = self.line.take() {
-            self.end_line_run(&line);
+            let mut dists = std::mem::take(&mut self.line_dists);
+            dists.clear();
+            let mut d = self.line_start;
+            for (i, p) in line.iter().enumerate() {
+                if i > 0 {
+                    d += (p[0] - line[i - 1][0]).hypot(p[1] - line[i - 1][1]);
+                }
+                dists.push(d);
+            }
+            self.end_line_run(&line, &dists);
+            self.line_dists = dists;
             self.scratch[0] = line;
         }
+        self.line_start = 0.0;
     }
 
     fn begin_polygon(&mut self) {
         self.pts.clear();
+        self.dists.clear();
         self.rings.clear();
         self.rings_seen = 0;
     }
@@ -399,6 +651,7 @@ impl Sink for MeshBuilder {
         // in for it.
         if !exterior && self.rings.is_empty() {
             self.pts.truncate(start);
+            self.dists.truncate(start);
             return;
         }
 
@@ -418,6 +671,19 @@ impl Sink for MeshBuilder {
             }
         }
 
+        // Distances around the ring as it stands, before clipping.
+        self.dists.truncate(start);
+        let mut length = 0.0;
+        for i in start..self.pts.len() {
+            if i > start {
+                length += (self.pts[i][0] - self.pts[i - 1][0]).hypot(self.pts[i][1] - self.pts[i - 1][1]);
+            }
+            self.dists.push(length);
+        }
+        if let (Some(first), Some(last)) = (self.pts.get(start), self.pts.last()) {
+            length += (first[0] - last[0]).hypot(first[1] - last[1]);
+        }
+
         if self.pts.len() - start >= 3 {
             let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
             for p in &self.pts[start..] {
@@ -427,12 +693,14 @@ impl Sink for MeshBuilder {
             let c = self.clip;
             if lo[0] > c || lo[1] > c || hi[0] < -c || hi[1] < -c {
                 self.pts.truncate(start); // wholly outside
+                self.dists.truncate(start);
             } else if lo[0] < -c || lo[1] < -c || hi[0] > c || hi[1] > c {
-                self.clip_ring(start);
+                self.clip_ring(start, length);
             }
         }
         if self.pts.len() - start < 3 {
             self.pts.truncate(start);
+            self.dists.truncate(start);
             return;
         }
         self.rings.push(start..self.pts.len());
@@ -452,13 +720,16 @@ impl Sink for MeshBuilder {
         self.earcut.triangulate(&self.pts, &self.rings, &mut self.tris);
         self.mesh.fills.extend(self.tris.iter().map(|&i| base + i));
         for i in 0..self.pts.len() {
-            self.push_vertex(self.pts[i]);
+            self.push_vertex(self.pts[i], self.dists[i]);
         }
+        let grid = |p: [f64; 2]| [p[0] as i64, p[1] as i64];
         for r in 0..self.rings.len() {
             let ring = self.rings[r].clone();
             for i in ring.clone() {
                 let next = if i + 1 == ring.end { ring.start } else { i + 1 };
                 if !self.on_boundary(self.pts[i], self.pts[next]) {
+                    let segment = self.mesh.outlines.len() / 2;
+                    self.ring_edges.push(RingEdge { a: grid(self.pts[i]), b: grid(self.pts[next]), segment });
                     self.mesh.outlines.extend_from_slice(&[base + i as u32, base + next as u32]);
                 }
             }
@@ -660,6 +931,147 @@ mod tests {
         b.points(&[[200.0, 200.0], [300.0, 300.0]]);
         b.end_line();
         assert!(b.finish().outlines.is_empty());
+    }
+
+    /// The distances, in grid steps (also map units, with this frame).
+    fn distances(m: &Mesh) -> Vec<f64> {
+        m.distances.iter().map(|&d| (d * 100.0 * 1000.0).round() / 1000.0).collect()
+    }
+
+    /// Outline segment `k`'s ends, in grid steps.
+    fn segment(m: &Mesh, k: usize) -> [[f64; 2]; 2] {
+        let p = positions(m);
+        [p[m.outlines[2 * k] as usize], p[m.outlines[2 * k + 1] as usize]]
+    }
+
+    #[test]
+    fn lines_carry_their_distance_from_their_start() {
+        let mut b = builder();
+        b.set_line_start(5.0);
+        b.begin_line();
+        b.points(&[[0.0, 0.0], [30.0, 0.0], [30.0, 40.0]]);
+        b.end_line();
+        // The start was for that line only.
+        b.begin_line();
+        b.points(&[[0.0, 50.0], [10.0, 50.0]]);
+        b.end_line();
+        assert_eq!(distances(&b.finish()), [5.0, 35.0, 75.0, 0.0, 10.0]);
+
+        // Out past the right edge and back: each cut lies as far along as
+        // the line it was cut from.
+        let mut b = builder();
+        b.begin_line();
+        b.points(&[[0.0, 0.0], [150.0, 0.0], [150.0, 20.0], [0.0, 20.0]]);
+        b.end_line();
+        let m = b.finish();
+        assert_eq!(positions(&m), [[0.0, 0.0], [110.0, 0.0], [110.0, 20.0], [0.0, 20.0]]);
+        assert_eq!(distances(&m), [0.0, 110.0, 210.0, 320.0]);
+    }
+
+    #[test]
+    fn a_line_in_measured_pieces_matches_it_whole() {
+        // Steps of 1.3 wiggling 2.5 snap to steps of 1 or 2 wiggling 3, so
+        // the source's own length is far from nazca's; none lies near
+        // halfway between grid points, nor in line with its neighbours.
+        let line: Vec<[f64; 2]> = (0..40).map(|i| [i as f64 * 1.3 - 40.05, if i % 2 == 0 { 0.2 } else { 2.7 }]).collect();
+        let mut b = builder();
+        b.begin_line();
+        b.points(&line);
+        b.end_line();
+        let whole = distances(&b.finish());
+
+        // The pieces meet at vertices 7 and 15, measured by the tile to the
+        // right, at the same level.
+        let right = MeshBuilder::new(TileFrame { center: [200.0, 0.0], half_span: 100.0 }, Detail { tile_px: 200.0, grid_px: 1.0, guard_px: 10.0 });
+        let mut b = builder();
+        let mut start = 0.0;
+        for piece in [&line[..=7], &line[7..=15], &line[15..]] {
+            b.set_line_start(start);
+            b.begin_line();
+            b.points(piece);
+            b.end_line();
+            start += right.line_length(piece);
+        }
+        let expected: Vec<f64> = whole[..=7].iter().chain(&whole[7..=15]).chain(&whole[15..]).copied().collect();
+        assert_eq!(distances(&b.finish()), expected);
+        let source: f64 = line.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+        assert!((start - whole[39]).abs() < 1e-3 && (source - start).abs() > 5.0, "{start} {source}");
+    }
+
+    #[test]
+    fn rings_carry_their_distance_through_clipping() {
+        let mut b = builder();
+        polygon(&mut b, &[&[[-10.0, -10.0], [10.0, -10.0], [10.0, 10.0], [-10.0, 10.0]]]);
+        assert_eq!(distances(&b.finish()), [0.0, 20.0, 40.0, 60.0]);
+
+        // Cut by the right edge: where it re-enters lies 200 + 20 + 40
+        // along.
+        let mut b = builder();
+        polygon(&mut b, &[&[[-50.0, -10.0], [150.0, -10.0], [150.0, 10.0], [-50.0, 10.0]]]);
+        let m = b.finish();
+        assert_eq!(positions(&m), [[-50.0, -10.0], [110.0, -10.0], [110.0, 10.0], [-50.0, 10.0]]);
+        assert_eq!(distances(&m), [0.0, 160.0, 260.0, 420.0]);
+
+        // The same ring started on the right, so the edge that closes it is
+        // cut: the cut lies 400 along, not on the way back to 0.
+        let mut b = builder();
+        polygon(&mut b, &[&[[150.0, -10.0], [150.0, 10.0], [-50.0, 10.0], [-50.0, -10.0]]]);
+        let m = b.finish();
+        assert_eq!(positions(&m), [[110.0, -10.0], [110.0, 10.0], [-50.0, 10.0], [-50.0, -10.0]]);
+        assert_eq!(distances(&m), [400.0, 60.0, 220.0, 240.0]);
+    }
+
+    #[test]
+    fn a_shared_border_is_paired_with_its_later_copy() {
+        let mut b = builder();
+        b.set_feature(1);
+        polygon(&mut b, &[&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]]);
+        // Nothing shared yet.
+        b.set_feature(2);
+        polygon(&mut b, &[&[[10.0, 0.0], [20.0, 0.0], [20.0, 10.0], [10.0, 10.0]]]);
+        let m = b.finish();
+        // The first square's right edge, and the second's left, run the
+        // other way; edges in line along y = 0 that only touch aren't paired.
+        assert_eq!(m.outlines.len() / 2, 8);
+        let paired: Vec<(usize, usize)> = (0..8).filter_map(|k| m.partner(k).map(|p| (k, p))).collect();
+        assert_eq!(paired, [(1, 7)]);
+        assert_eq!(segment(&m, 1), [[10.0, 0.0], [10.0, 10.0]]);
+        assert_eq!(segment(&m, 7), [[10.0, 10.0], [10.0, 0.0]]);
+
+        let mut b = builder();
+        polygon(&mut b, &[&[[-10.0, -10.0], [10.0, -10.0], [10.0, 10.0], [-10.0, 10.0]]]);
+        assert!(b.finish().partners.is_empty());
+    }
+
+    #[test]
+    fn a_t_junction_splits_the_edge_it_meets() {
+        let mut b = builder();
+        // One wide polygon over two narrow ones: its bottom edge is one
+        // edge, theirs two, meeting at (10, 10).
+        b.set_feature(1);
+        polygon(&mut b, &[&[[0.0, 10.0], [20.0, 10.0], [20.0, 20.0], [0.0, 20.0]]]);
+        b.set_feature(2);
+        polygon(&mut b, &[&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]]);
+        b.set_feature(3);
+        polygon(&mut b, &[&[[10.0, 0.0], [20.0, 0.0], [20.0, 10.0], [10.0, 10.0]]]);
+        let m = b.finish();
+        assert_eq!(m.outlines.len() / 2, 13);
+        assert_eq!(segment(&m, 0), [[0.0, 10.0], [10.0, 10.0]]);
+        assert_eq!(segment(&m, 1), [[10.0, 10.0], [20.0, 10.0]]);
+        // The vertex the split adds is the wide polygon's, 10 along it.
+        let split = m.outlines[1] as usize;
+        assert_eq!((m.ids[split], distances(&m)[split]), (1, 10.0));
+        let mut paired = 0;
+        for k in 0..13 {
+            if let Some(p) = m.partner(k) {
+                assert!(p > k);
+                let [a, b] = segment(&m, k);
+                assert_eq!(segment(&m, p), [b, a], "segment {k}");
+                paired += 1;
+            }
+        }
+        // Both halves of the wide edge, and the narrow ones' shared side.
+        assert_eq!(paired, 3);
     }
 
     #[test]

@@ -6,7 +6,7 @@ WebAssembly. Geometry is prepared once into tiles, then either redrawn every
 frame by the GPU backend or written once at print resolution by the SVG
 backend.
 
-Current version: 0.2.1.
+Current version: 0.3.0.
 
 
 ## PHILOSOPHY
@@ -20,9 +20,10 @@ Current version: 0.2.1.
     meshes under one byte budget.
 -   **The default build is standard-library only.** WKB reading,
     preparation, the tile cache, the camera and the SVG backend need no
-    other crate. The GPU backend adds `glow`. The `mvt` and `mlt` decoders
-    are hand-written and add nothing. Any dependency is pure Rust and builds
-    for `wasm32-unknown-unknown` unmodified.
+    other crate. The GPU backend adds `glow`, and symbols from SVG markup add
+    `resvg`. The `mvt` and `mlt` decoders are hand-written and add nothing.
+    Any dependency is pure Rust and builds for `wasm32-unknown-unknown`
+    unmodified.
 -   **Compose rather than embed.** Nazca does not read files, fetch tiles,
     open windows or reproject. It names the tiles a camera needs, and the
     embedder fetches them and hands the bytes in. Coordinates arrive in the
@@ -43,7 +44,7 @@ To use it as a library:
 
 ```sh
 cargo add nazca
-cargo add nazca --features gl,mvt,mlt
+cargo add nazca --features gl,symbols,mvt,mlt
 ```
 
 The tests run with `cargo test --all-features`. The MLT conformance tests
@@ -75,8 +76,12 @@ for geom in &wkb_polygons {
     wkb::read(geom, &mut mesh)?;
 }
 
+let mut style = Style::default();   // draws nothing until given colours
+style.fill = [0.8, 0.85, 0.76, 1.0];
+style.line = [0.36, 0.43, 0.33, 1.0];
+style.line_width = 1.0;
 let mut palette = Palette::new();
-palette.set(1, Style { fill: [0.8, 0.85, 0.76, 1.0], line: [0.36, 0.43, 0.33, 1.0], line_width: 1.0, point_size: 0.0 });
+palette.set(1, style);
 
 let mut svg = SvgWriter::new(camera.size_px, None);
 svg.begin_layer();
@@ -103,13 +108,41 @@ differently, `Renderer::state` uploads a byte of flags per feature, and
 layer drawn only through a state, as a filter, picks and exports only what
 is on screen.
 
+The embedder owns the GL context and wraps it in a `gl::Context`, which
+every call takes:
+
+```rust
+use nazca::gl::{Context, Renderer};
+use nazca::{TileKey, TileSelector};
+
+// Natively through the context's loader (glutin's here); in a browser,
+// Context::from_webgl2(webgl2_context).
+let gl = unsafe { Context::from_loader(|name| display.get_proc_address(name)) };
+let mut renderer = Renderer::new(&gl)?;
+let gpu_palette = renderer.palette(&gl, &palette)?;
+
+// Each frame:
+renderer.begin_frame(&gl, &camera, background);
+cache.begin_frame();
+needed.clear();
+grid.select(&camera, &mut needed);
+cache.plan(SOURCE, &grid, &needed, &mut plan);
+// ... fetch plan.fetch, prepare each with MeshBuilder::for_tile, upload
+// it with renderer.upload and cache.insert it ...
+renderer.begin_layer(&gl);
+for &tile in &plan.draw {
+    let mesh = cache.get(TileKey { source: SOURCE, tile }).unwrap();
+    renderer.draw(&gl, mesh, &camera, &gpu_palette);
+}
+```
+
 The native spike draws the Massachusetts counties in a window, and a click
 picks one and selects it. F shows every other county through a state, and
 `--svg out.svg` writes the view as an SVG:
 
-    cargo run --features gl --example spike
-    cargo run --features gl --example spike -- --screenshot out.png
-    cargo run --features gl --example spike -- --filter --svg out.svg
+    cargo run --features gl,symbols --example spike
+    cargo run --features gl,symbols --example spike -- --screenshot out.png
+    cargo run --features gl,symbols --example spike -- --filter --svg out.svg
 
 `spike-web/` is the same in a browser:
 
@@ -118,6 +151,72 @@ picks one and selects it. F shows every other county through a state, and
 
 A browser binding belongs in its own crate, as in `spike-web/`, rather than
 in Nazca.
+
+### Symbols
+
+A style class can draw with images: a **marker** in place of a point's dot,
+a **dash** pattern on its lines and outlines, and a **pattern** repeated over
+its fill in place of the flat colour. A `Symbol` is an RGBA image, and a
+`Symbols` packs them into one atlas, each named by a `SymbolId`. A symbol is
+one of two kinds. A colour symbol is drawn as it is, its alpha multiplied by
+the class's fill alpha. A mask uses only its alpha, tinted by the class's
+fill colour, so one pin or one hatch serves every colour a palette gives it.
+
+```rust
+use nazca::symbol::Kind;
+use nazca::{Dash, Detail, Marker, Palette, Pattern, Style, Symbol, Symbols};
+
+let mut symbols = Symbols::new();
+// A pin 24 pixels tall, rasterized at twice that for a pixel ratio of 2
+// (feature `symbols`), its tip on the point.
+let mut pin = Symbol::from_svg(PIN_SVG, 24.0, 2.0, Kind::Mask)?;
+pin.anchor = [0.5, 1.0];
+let pin = symbols.add(pin)?;
+let hatch = symbols.add(hatch)?;   // a Symbol::new of the embedder's pixels
+
+let mut style = Style::default();
+style.fill = [0.13, 0.4, 0.85, 1.0];
+style.line = [0.2, 0.2, 0.2, 1.0];
+style.line_width = 1.5;
+style.point_size = 24.0;   // a marker's longest side
+style.marker = Some(Marker::new(pin));
+style.dash = Dash::new(&[6.0, 4.0], 0.0);
+style.pattern = Some(Pattern::new(hatch, 16.0));
+let mut palette = Palette::new();
+palette.set(1, style);
+palette.check_reach(&symbols, Detail::default().guard_px)?;
+
+renderer.set_symbols(&gl, &symbols)?;   // the GPU's atlas
+svg.symbols(&symbols);                  // or a layout's
+```
+
+-   **Sizes.** A symbol has no size of its own; the style gives it one, in
+    pixels. Rasterize it at the device's pixel ratio or more and say so in
+    its `scale`. Drawn larger than its pixels divided by its scale it
+    blurs, and `Palette::blurred` names the classes that do; drawn smaller
+    than a quarter of that it can shimmer. Either way, add it again at
+    another size.
+-   **The guard band.** A tile draws a marker cut at its edge, and the
+    neighbour draws the rest from its own copy of the point, so a marker
+    must reach no further than half the tiles' guard band.
+    `Palette::check_reach` says whether every marker does, and what guard
+    band one needs.
+-   **Dashes** are in pixels and have round ends, as lines do, so each dash
+    is drawn a line width longer than its on length and each gap that much
+    shorter. An on length of 0 is a dot. A line handed in as pieces starts
+    each piece where the ones before end, with `MeshBuilder::set_line_start`
+    of their `MeshBuilder::line_length`s summed, so the pattern runs on
+    across the seams.
+-   **From SVG.** With the `symbols` feature, `Symbol::from_svg` rasterizes
+    any static SVG with `resvg`, but its text, which needs fonts. It adds
+    about 1 MB to a WebAssembly build, under 400 KB gzipped. A browser
+    embedder can instead draw its icons to a canvas and hand in the pixels
+    with `Symbol::new`, at no cost, though a layout then writes them as
+    images.
+-   **In a layout**, each symbol used is written once: as its markup if
+    `Symbol::from_svg` made it, cleaned of scripts, styles and external
+    references and its ids made unique, or else as a PNG. Markers are
+    `<use>`s of it, patterns `<pattern>`s, and dashes `stroke-dasharray`.
 
 ### Vector tiles
 
@@ -141,6 +240,8 @@ for layer in nazca::mlt::layers(&tile_bytes) {
 | MVT | `mvt` | Mapbox Vector Tile, geometry and ids |
 | MLT | `mlt` | MapLibre Tile v1, geometry and ids; passes all 366 conformance fixtures |
 | Rasters | default | R8 categorical, R32F continuous with NaN or nodata, RGBA |
+| Symbols | default | RGBA images, as markers, dashes' patterns and pattern fills |
+| SVG symbols | `symbols` | Any static SVG but its text, rasterized by `resvg` |
 
 | Backend | Feature | Draws |
 |---|---|---|
@@ -161,12 +262,18 @@ overlap never blend twice. Picking draws feature ids into a one-pixel integer
 target. Feature state redraws only the features a small texture of flags
 marks, so a selection or a hover rewrites that texture and no geometry; a
 pick can follow the same flags, so a filtered layer picks only what it shows.
+Markers, dash patterns and pattern fills come from one mipmapped atlas and
+the palette texture, so restyling them uploads no image and no geometry. A
+marker picks where its image is at least half opaque; dashes run on across
+tile edges without crawling as the map pans; a pattern is anchored to the
+map, seamless across tiles at every zoom.
 
 **SVG backend.** Fills come from the polygon rings rather than the triangles,
 and lines are exactly the segments the GPU strokes. A layer's fills and lines
 are gathered into one path per class, so a polygon split along tile edges
-shows no seams in an antialiasing viewer. Feature state works as on the GPU,
-from the same bytes of flags.
+shows no seams in an antialiasing viewer. A border two polygons share is
+drawn once, on screen and in SVG. Feature state works as on the GPU, from
+the same bytes of flags.
 
 **Camera.** Pan, zoom and rotate about a point, fit to bounds, and convert
 between screen and map. Matrices are composed in `f64`, so a tile's offset
@@ -178,7 +285,11 @@ do (`style::interpolate`), on MapLibre's zoom (`TileGrid::fractional_level`).
 
 ## LIMITATIONS
 
--   **No text.** Labels, and their placement and collision, are not drawn yet.
+-   **No text.** Labels, and their placement and collision, are not drawn yet,
+    and an SVG symbol's text is dropped.
+-   **Symbols are images.** One drawn much larger or smaller than its pixels
+    blurs or shimmers, and is added again at another size. Symbols drawn as
+    vector shapes are planned.
 -   **No raster output.** The SVG backend does not write rasters, and there is
     no CPU rasterizer for PNG layouts.
 -   **Flat maps only.** A globe is planned; v1 is designed so it is not
@@ -208,7 +319,10 @@ Design notes are in [plans/rendering.org](plans/rendering.org), the scope in
 -   **`earcut.rs`:** a port of mapbox/earcut.
 -   **`camera.rs`, `select.rs`:** the camera and the `TileSelector` trait.
 -   **`cache.rs`:** the tile cache and each frame's draw and fetch plan.
--   **`style.rs`:** palettes, colormaps and zoom curves.
+-   **`style.rs`:** palettes with their markers, dashes and patterns,
+    colormaps and zoom curves.
+-   **`symbol.rs`:** symbols and their atlas, and `Symbol::from_svg`
+    (feature `symbols`).
 -   **`raster.rs`:** raster bands and the meshes they are drawn over.
 -   **`gl.rs`:** the GPU backend (feature `gl`), the only module allowed
     `unsafe`.

@@ -1,15 +1,17 @@
-//! The native half of the `glow` spike (`plans/rendering.org` § V1 SLICE):
+//! The native half of the GL spike (`plans/rendering.org` § V1 SLICE):
 //! the Massachusetts counties, prepared tile by tile through nazca's camera,
 //! tile selector and tile cache and drawn by its `gl` backend in a winit
 //! window over an OpenGL 3.3 core context. Drag to pan, scroll to zoom about
 //! the cursor, right-drag to rotate about the window's centre, click to pick
 //! a county and toggle its selection, press H to toggle a hover state on the
-//! county picked last, press F to show every other county, and press R to
-//! cycle the raster overlay.
+//! county picked last, press F to show every other county, press M to cycle
+//! the markers, press D to cycle the outlines (solid, dashed, dotted,
+//! translucent), press P to cycle the patterns over the counties (a hatch,
+//! a stipple), and press R to cycle the raster overlay.
 //!
-//!   cargo run -p nazca --features gl --example spike
-//!   cargo run -p nazca --features gl --example spike -- --screenshot out.png
-//!   cargo run -p nazca --features gl --example spike -- --bearing 30 --raster continuous
+//!   cargo run -p nazca --features gl,symbols --example spike
+//!   cargo run -p nazca --features gl,symbols --example spike -- --screenshot out.png
+//!   cargo run -p nazca --features gl,symbols --example spike -- --bearing 30 --raster continuous
 //!
 //! `--screenshot` draws one frame, writes it as a PNG and exits. `--bearing`
 //! opens the map turned that many degrees, east of north up. `--raster`
@@ -20,12 +22,30 @@
 //! state after the first frame. `--filter` opens showing every other county,
 //! as F toggles. `--svg out.svg` writes the first frame as an SVG, through
 //! the same states, and exits. `--check-state` reads back and picks a
-//! synthetic grid of features drawn by state, reports and exits.
+//! synthetic grid of features drawn by state, reports and exits. `--own-gl`
+//! makes GL calls of the spike's own between two of nazca's layers, through
+//! a `glow` binding of its own over the same context, as an embedder drawing
+//! something of its own would: a square in the top left corner. `--markers`
+//! (`colour`, `mask` or `markup`, the last from SVG markup) opens with the
+//! counties' markers, as M cycles them.
+//! `--check-markers` checks the guard band check and picking a marker by its
+//! image, reports and exits. `--centre NAME` centres the view on that
+//! county's marker, and `--level Z` sets the zoom to MapLibre's zoom `Z`
+//! (the grid's level, fractional), as a tile-edge check aims a view.
+//! `--outlines` (`dashed`, `dotted` or `translucent`) opens with those
+//! outlines, as D cycles them. `--check-dashes` checks shared borders and
+//! dashes by reading the framebuffer, measures line starts' seams, the
+//! phase of a line far along it and the cost of matching borders, reports
+//! and exits. `--patterns` (`hatch` or `stipple`) opens with that pattern
+//! over the counties, as P cycles them. `--check-patterns` checks pattern
+//! fills by reading the framebuffer, reports and exits. `--measure-markers`
+//! times the 2,500-point grid drawn as dots and as markers, reports and
+//! exits.
 
 mod data;
 mod tiles;
 
-use data::Overlay;
+use data::{Markers, Outlines, Overlay, Patterns};
 use glutin::config::{ConfigTemplateBuilder, GlConfig};
 use glutin::context::{ContextApi, ContextAttributesBuilder, GlProfile, NotCurrentGlContext, PossiblyCurrentContext, Version};
 use glutin::display::{GetGlDisplay, GlDisplay};
@@ -33,10 +53,10 @@ use glutin::surface::{GlSurface, Surface, WindowSurface};
 use glutin_winit::{DisplayBuilder, GlWindow};
 use glow::HasContext;
 use nazca::Camera;
-use nazca::gl::Renderer;
+use nazca::gl::{Context, Renderer};
 use raw_window_handle::HasWindowHandle;
 use std::num::NonZeroU32;
-use tiles::{HOVERED, SELECTED, TiledMap};
+use tiles::{HOVERED, SELECTED, Stats, TiledMap};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -48,9 +68,55 @@ struct Gfx {
     window: Window,
     surface: Surface<WindowSurface>,
     context: PossiblyCurrentContext,
-    gl: glow::Context,
+    gl: Context,
     renderer: Renderer,
     map: TiledMap,
+    own: Option<OwnGl>,
+}
+
+impl Gfx {
+    fn draw(&mut self, camera: &Camera) -> Stats {
+        match &self.own {
+            Some(own) => self.map.draw_with(&self.gl, &self.renderer, camera, &mut || own.draw(camera.size_px[1])),
+            None => self.map.draw(&self.gl, &self.renderer, camera),
+        }
+    }
+}
+
+/// The spike's own GL objects and the binding it draws them through.
+struct OwnGl {
+    gl: glow::Context,
+    vao: glow::VertexArray,
+    texture: glow::Texture,
+}
+
+impl OwnGl {
+    fn new(gl: glow::Context) -> OwnGl {
+        // SAFETY: creates objects of its own on the current context.
+        let (vao, texture) = unsafe { (gl.create_vertex_array().unwrap(), gl.create_texture().unwrap()) };
+        OwnGl { gl, vao, texture }
+    }
+
+    /// Clears a square in the top left corner of a framebuffer `height`
+    /// pixels high. It leaves its own array, texture and texture unit bound
+    /// and no program, which nazca's draws must not rely on, and restores the
+    /// scissor test, the one part of the frame's state it changes (`gl.rs`'s
+    /// module docs).
+    fn draw(&self, height: u32) {
+        // SAFETY: binds objects of its own and clears within a scissor, on
+        // the context nazca draws with, current on this thread.
+        unsafe {
+            self.gl.use_program(None);
+            self.gl.bind_vertex_array(Some(self.vao));
+            self.gl.active_texture(glow::TEXTURE3);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+            self.gl.enable(glow::SCISSOR_TEST);
+            self.gl.scissor(16, height as i32 - 56, 40, 40);
+            self.gl.clear_color(0.9, 0.1, 0.6, 1.0);
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+            self.gl.disable(glow::SCISSOR_TEST);
+        }
+    }
 }
 
 struct Options {
@@ -62,8 +128,18 @@ struct Options {
     states: Vec<([f64; 2], u8)>,
     check_state: bool,
     filter: bool,
+    own_gl: bool,
     svg: Option<String>,
     zoom: f64,
+    markers: Markers,
+    check_markers: bool,
+    centre: Option<String>,
+    level: Option<f64>,
+    outlines: Outlines,
+    check_dashes: bool,
+    measure_markers: bool,
+    patterns: Patterns,
+    check_patterns: bool,
 }
 
 struct App {
@@ -94,7 +170,60 @@ impl App {
             self.options.filter = false;
             g.map.set_filter(&g.gl, &g.renderer, true);
         }
-        let stats = g.map.draw(&g.gl, &g.renderer, camera);
+        if self.options.measure_markers {
+            let start = std::time::Instant::now();
+            let clock = move || start.elapsed().as_secs_f64() * 1e3;
+            match tiles::measure_markers(&g.map, &g.gl, &g.renderer, camera.size_px, &clock) {
+                Ok(report) => println!("{report}"),
+                Err(e) => {
+                    eprintln!("marker measurement failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
+        if self.options.check_dashes {
+            let start = std::time::Instant::now();
+            let clock = move || start.elapsed().as_secs_f64() * 1e3;
+            match tiles::check_dashes(&g.gl, &g.renderer, g.map.counties(), camera.size_px, &clock) {
+                Ok(report) => println!("{report}"),
+                Err(e) => {
+                    eprintln!("dash check failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
+        if self.options.check_patterns {
+            match tiles::check_patterns(&g.map, &g.gl, &g.renderer, camera.size_px) {
+                Ok(report) => println!("{report}"),
+                Err(e) => {
+                    eprintln!("pattern check failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
+        if self.options.patterns != Patterns::None {
+            g.map.set_patterns(&g.gl, &g.renderer, std::mem::replace(&mut self.options.patterns, Patterns::None));
+        }
+        if self.options.outlines != Outlines::Solid {
+            g.map.set_outlines(&g.gl, &g.renderer, std::mem::replace(&mut self.options.outlines, Outlines::Solid));
+        }
+        if self.options.markers != Markers::None {
+            g.map.set_markers(&g.gl, &g.renderer, std::mem::replace(&mut self.options.markers, Markers::None));
+        }
+        if self.options.check_markers {
+            match tiles::check_markers(&mut g.map, &g.gl, &g.renderer, camera) {
+                Ok(report) => println!("{report}"),
+                Err(e) => {
+                    eprintln!("marker check failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
+        let stats = g.draw(camera);
         if stats.prepared > 0 {
             println!(
                 "level {}: {} tiles drawn, {} prepared; {} cached, {} KB",
@@ -106,11 +235,11 @@ impl App {
             );
         }
         if let Some(px) = self.options.pick.take() {
-            report(g.map.pick(&g.gl, &g.renderer, camera, px), px);
+            report(g.map.pick(&g.gl, &g.renderer, camera, px).as_ref(), px);
         }
         for (px, bit) in std::mem::take(&mut self.options.states) {
             let pick = g.map.pick(&g.gl, &g.renderer, camera, px);
-            report(pick, px);
+            report(pick.as_ref(), px);
             if let Some((_, id)) = pick {
                 g.map.toggle(&g.gl, &g.renderer, id, bit);
             }
@@ -126,12 +255,8 @@ impl App {
             let [w, h] = camera.size_px;
             // The pick (if any) rebound the window; draw again so the read
             // sees a frame drawn after it.
-            g.map.draw(&g.gl, &g.renderer, camera);
-            let mut pixels = vec![0u8; (w * h * 4) as usize];
-            // SAFETY: reads the frame just drawn into a buffer sized for it.
-            unsafe {
-                g.gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixels)));
-            }
+            g.draw(camera);
+            let pixels = g.gl.read_pixels([w, h]);
             // GL's rows run bottom-up; PNG's top-down.
             let flipped: Vec<u8> = pixels.chunks((w * 4) as usize).rev().flatten().copied().collect();
             let file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
@@ -146,9 +271,9 @@ impl App {
     }
 }
 
-fn report(pick: Option<(&str, u32)>, px: [f64; 2]) {
+fn report(pick: Option<&(String, u32)>, px: [f64; 2]) {
     match pick {
-        Some((name, id)) => println!("picked {name} County (feature {id}) at {px:?}"),
+        Some((name, id)) => println!("picked {name} (feature {id}) at {px:?}"),
         None => println!("picked nothing at {px:?}"),
     }
 }
@@ -173,18 +298,21 @@ impl ApplicationHandler for App {
             .build(window.window_handle().ok().map(|h| h.as_raw()));
         let surface_attributes = window.build_surface_attributes(Default::default()).unwrap();
         // SAFETY: the context and surface are made from this display's own
-        // config, for a window that outlives them (both live in `Gfx`).
-        let (context, surface, gl) = unsafe {
+        // config, for a window that outlives them (both live in `Gfx`); the
+        // loader's functions are an OpenGL 3.3 core context's, current on
+        // this thread from here on.
+        let (context, surface, gl, own) = unsafe {
             let context = display.create_context(&config, &context_attributes).unwrap();
             let surface = display.create_window_surface(&config, &surface_attributes).unwrap();
             let context = context.make_current(&surface).unwrap();
-            let gl = glow::Context::from_loader_function_cstr(|s| display.get_proc_address(s));
-            (context, surface, gl)
+            let gl = Context::from_loader(|s| display.get_proc_address(s));
+            let own = self.options.own_gl.then(|| OwnGl::new(glow::Context::from_loader_function_cstr(|s| display.get_proc_address(s))));
+            (context, surface, gl, own)
         };
-        println!("GL: {}, stencil bits: {}", unsafe { gl.get_parameter_string(glow::VERSION) }, config.stencil_size());
+        println!("GL: {}, stencil bits: {}", gl.version(), config.stencil_size());
 
-        let renderer = Renderer::new(&gl).unwrap();
-        let map = TiledMap::new(&gl, &renderer, 16 << 20, self.options.overlay);
+        let mut renderer = Renderer::new(&gl).unwrap();
+        let map = TiledMap::new(&gl, &mut renderer, 16 << 20, self.options.overlay);
 
         // Fit the counties, with a margin.
         let size = window.inner_size();
@@ -192,9 +320,16 @@ impl ApplicationHandler for App {
         camera.bearing = self.options.bearing.to_radians();
         camera.fit_bounds(map.bounds(), 0.04 * size.width.min(size.height) as f64);
         camera.zoom_about([size.width as f64 / 2.0, size.height as f64 / 2.0], self.options.zoom);
+        if let Some(name) = &self.options.centre {
+            camera.center = map.marker(name).unwrap_or_else(|| panic!("no county {name}"));
+        }
+        if let Some(z) = self.options.level {
+            // The 512-pixel Web Mercator grid's resolution at level `z`.
+            camera.units_per_px = std::f64::consts::TAU * 6_378_137.0 / 512.0 / 2f64.powf(z);
+        }
         self.camera = Some(camera);
         window.request_redraw();
-        self.gfx = Some(Gfx { window, surface, context, gl, renderer, map });
+        self.gfx = Some(Gfx { window, surface, context, gl, renderer, map, own });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -215,7 +350,7 @@ impl ApplicationHandler for App {
                         if start.is_some_and(|s| (s.x - self.cursor.x).abs() + (s.y - self.cursor.y).abs() < 4.0) {
                             let px = [self.cursor.x, self.cursor.y];
                             let pick = g.map.pick(&g.gl, &g.renderer, camera, px);
-                            report(pick, px);
+                            report(pick.as_ref(), px);
                             if let Some((_, id)) = pick {
                                 g.map.toggle(&g.gl, &g.renderer, id, SELECTED);
                             }
@@ -251,6 +386,21 @@ impl ApplicationHandler for App {
                     println!("overlay: {next:?}");
                 }
                 Key::Character(c) if c.eq_ignore_ascii_case("h") => g.map.toggle_last(&g.gl, &g.renderer, HOVERED),
+                Key::Character(c) if c.eq_ignore_ascii_case("m") => {
+                    let next = g.map.markers().next();
+                    g.map.set_markers(&g.gl, &g.renderer, next);
+                    println!("markers: {next:?}");
+                }
+                Key::Character(c) if c.eq_ignore_ascii_case("d") => {
+                    let next = g.map.outlines().next();
+                    g.map.set_outlines(&g.gl, &g.renderer, next);
+                    println!("outlines: {next:?}");
+                }
+                Key::Character(c) if c.eq_ignore_ascii_case("p") => {
+                    let next = g.map.patterns().next();
+                    g.map.set_patterns(&g.gl, &g.renderer, next);
+                    println!("patterns: {next:?}");
+                }
                 Key::Character(c) if c.eq_ignore_ascii_case("f") => {
                     let on = !g.map.filtered();
                     g.map.set_filter(&g.gl, &g.renderer, on);
@@ -273,10 +423,30 @@ impl ApplicationHandler for App {
 
 fn main() {
     let usage = || -> ! {
-        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state]");
+        eprintln!("usage: spike [--screenshot out.png] [--bearing degrees] [--raster continuous|categorical] [--pick X,Y] [--select X,Y] [--hover X,Y] [--zoom F] [--filter] [--svg out.svg] [--check-state] [--own-gl] [--markers colour|mask|markup] [--check-markers] [--centre NAME] [--level Z] [--outlines dashed|dotted|translucent] [--check-dashes] [--patterns hatch|stipple] [--check-patterns] [--measure-markers]");
         std::process::exit(2);
     };
-    let mut options = Options { screenshot: None, bearing: 0.0, overlay: Overlay::None, pick: None, states: Vec::new(), check_state: false, filter: false, svg: None, zoom: 1.0 };
+    let mut options = Options {
+        screenshot: None,
+        bearing: 0.0,
+        overlay: Overlay::None,
+        pick: None,
+        states: Vec::new(),
+        check_state: false,
+        filter: false,
+        own_gl: false,
+        svg: None,
+        zoom: 1.0,
+        markers: Markers::None,
+        check_markers: false,
+        centre: None,
+        level: None,
+        outlines: Outlines::Solid,
+        check_dashes: false,
+        measure_markers: false,
+        patterns: Patterns::None,
+        check_patterns: false,
+    };
     let mut args = std::env::args().skip(1);
     let point = |value: &str| -> [f64; 2] {
         let xy: Vec<f64> = value.split(',').map(|v| v.parse().unwrap_or_else(|_| usage())).collect();
@@ -292,6 +462,26 @@ fn main() {
             options.filter = true;
             continue;
         }
+        if flag == "--own-gl" {
+            options.own_gl = true;
+            continue;
+        }
+        if flag == "--check-markers" {
+            options.check_markers = true;
+            continue;
+        }
+        if flag == "--check-dashes" {
+            options.check_dashes = true;
+            continue;
+        }
+        if flag == "--check-patterns" {
+            options.check_patterns = true;
+            continue;
+        }
+        if flag == "--measure-markers" {
+            options.measure_markers = true;
+            continue;
+        }
         let value = args.next().unwrap_or_else(|| usage());
         match flag.as_str() {
             "--screenshot" => options.screenshot = Some(value),
@@ -305,6 +495,31 @@ fn main() {
                     _ => usage(),
                 }
             }
+            "--markers" => {
+                options.markers = match value.as_str() {
+                    "colour" => Markers::Colour,
+                    "mask" => Markers::Mask,
+                    "markup" => Markers::Markup,
+                    _ => usage(),
+                }
+            }
+            "--outlines" => {
+                options.outlines = match value.as_str() {
+                    "dashed" => Outlines::Dashed,
+                    "dotted" => Outlines::Dotted,
+                    "translucent" => Outlines::Translucent,
+                    _ => usage(),
+                }
+            }
+            "--patterns" => {
+                options.patterns = match value.as_str() {
+                    "hatch" => Patterns::Hatch,
+                    "stipple" => Patterns::Stipple,
+                    _ => usage(),
+                }
+            }
+            "--centre" => options.centre = Some(value),
+            "--level" => options.level = Some(value.parse().unwrap_or_else(|_| usage())),
             "--pick" => options.pick = Some(point(&value)),
             "--select" => options.states.push((point(&value), SELECTED)),
             "--hover" => options.states.push((point(&value), HOVERED)),

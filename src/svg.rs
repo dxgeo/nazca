@@ -7,11 +7,41 @@
 //! - *Fills* are the mesh's polygon rings (`Mesh::rings`, `Mesh::polygons`),
 //!   not the triangles, which would show their seams once antialiased and
 //!   cost more.
+//! - *Patterns* are a `<pattern>` for each class and layer that fills with
+//!   one, named by the class's `fill`, in user space: repeats of the
+//!   symbol's box laid along the map's axes from the map's origin, as on
+//!   screen, the one written being the repeat that holds the camera's
+//!   centre, so its numbers stay small far from the origin. It holds a
+//!   `<use>` of the symbol, or for a mask a `<rect>` of the class's fill
+//!   through its `<mask>`. It is placed by the camera of the first draw
+//!   that uses it, as the same camera draws every layer of a page.
 //! - *Lines* are the mesh's outline segments, chained back into polylines.
 //!   These are exactly the segments the GPU draws, so edges that clipping
 //!   made are not stroked here either, and lines draw over every fill of
-//!   their layer, as on screen.
-//! - *Points* are `<circle>`s of the class's point size, in its fill colour.
+//!   their layer, as on screen. Each is cut to the tile's own area, half
+//!   open as points are, so a line in a neighbour's guard band too is
+//!   written once; a dash cut at a tile edge is two capped halves whose
+//!   union looks whole. The earlier copy of a shared border is left out
+//!   where its partner is written, as on screen ([`Mesh::partners`]).
+//! - *Dashes* are `stroke-dasharray`, with the dash's phase as the class's
+//!   `stroke-dashoffset`. SVG starts the pattern again at each subpath, so a
+//!   chain that starts part-way through it, by its distance along its line,
+//!   is a `<path>` of its own with its own offset; only chains that start at
+//!   the pattern's start share the class's one path.
+//! - *Points* are `<circle>`s of the class's point size, in its fill colour,
+//!   or, where the class has a [`crate::Marker`], its symbol: a `<use>` of
+//!   it placed, sized and turned as on screen, or for a mask a `<rect>` of
+//!   the class's fill through a `<mask>` of it. Each symbol a marker or a
+//!   pattern uses is written once, in `<defs>`, from the [`Symbols`] given to
+//!   [`SvgWriter::symbols`], filling the box of its pixels: as its markup
+//!   when `Symbol::from_svg` built it (the `symbols` feature), an `<svg>` of
+//!   the pixels' size around `usvg`'s rewrite, or else as a PNG of its
+//!   pixels, stored uncompressed by a small encoder here. A mask's PNG is
+//!   white where it is opaque, and its markup's `currentColor` white, so a
+//!   viewer reading the mask by luminance, without `mask-type: alpha`, sees
+//!   the same mask. A point is written by the tile whose own area holds it,
+//!   so a point in a neighbour's guard band too is written once, not once
+//!   from each.
 //!
 //! *A layer is one `<path>` per class for its fills and one for its lines*,
 //! gathered over every [`SvgWriter::draw`] of the layer and written when it
@@ -45,8 +75,9 @@
 
 use crate::camera::Camera;
 use crate::prepare::Mesh;
-use crate::style::Palette;
-use std::collections::BTreeMap;
+use crate::style::{Align, Palette, Style, pattern_phase};
+use crate::symbol::{Kind, Symbol, Symbols};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 /// Builds one SVG document. See the module docs.
@@ -61,7 +92,16 @@ pub struct SvgWriter {
     /// point elements: written to `body` when the layer ends.
     fills: BTreeMap<u8, String>,
     lines: BTreeMap<u8, String>,
+    /// Dashed chains that start part-way through their pattern, by class:
+    /// each one's `stroke-dashoffset` and path data.
+    runs: BTreeMap<u8, Vec<(f64, String)>>,
     points: String,
+    /// The symbols markers and patterns draw, by id, and the ids one has
+    /// used.
+    symbols: BTreeMap<u16, Symbol>,
+    used: BTreeSet<u16>,
+    /// The `<pattern>` elements fills use, by id.
+    patterns: BTreeMap<String, String>,
 }
 
 impl SvgWriter {
@@ -76,8 +116,20 @@ impl SvgWriter {
             layer: 0,
             fills: BTreeMap::new(),
             lines: BTreeMap::new(),
+            runs: BTreeMap::new(),
             points: String::new(),
+            symbols: BTreeMap::new(),
+            used: BTreeSet::new(),
+            patterns: BTreeMap::new(),
         }
+    }
+
+    /// The symbols markers and patterns draw from, in place of any given
+    /// before. Each one used is written once, in `<defs>`. Give them before
+    /// drawing the layers that use them; a marker or pattern whose symbol
+    /// isn't here draws nothing, as on screen.
+    pub fn symbols(&mut self, symbols: &Symbols) {
+        self.symbols = symbols.iter().map(|(id, s, _)| (id.0, s.clone())).collect();
     }
 
     /// Starts a layer: what follows draws over what came before, and may use
@@ -93,8 +145,14 @@ impl SvgWriter {
         for (class, d) in std::mem::take(&mut self.fills) {
             let _ = writeln!(self.body, r#"<path class="f{layer}-{class}" d="{d}"/>"#);
         }
+        let mut runs = std::mem::take(&mut self.runs);
         for (class, d) in std::mem::take(&mut self.lines) {
-            let _ = writeln!(self.body, r#"<path class="l{layer}-{class}" d="{d}"/>"#);
+            if !d.is_empty() {
+                let _ = writeln!(self.body, r#"<path class="l{layer}-{class}" d="{d}"/>"#);
+            }
+            for (offset, d) in runs.remove(&class).unwrap_or_default() {
+                let _ = writeln!(self.body, r#"<path class="l{layer}-{class}" style="stroke-dashoffset:{}" d="{d}"/>"#, num(offset));
+            }
         }
         self.body.push_str(&std::mem::take(&mut self.points));
     }
@@ -139,7 +197,26 @@ impl SvgWriter {
                 continue;
             }
             let name = format!("f{layer}-{class}");
-            self.styles.entry(name).or_insert_with(|| format!("fill:{};stroke:none;fill-rule:nonzero", paint(style.fill)));
+            let fill = match style.pattern {
+                None => paint(style.fill),
+                Some(pattern) => {
+                    let Some(symbol) = self.symbols.get(&pattern.symbol.0) else { continue };
+                    let Some(cell) = pattern.cell([symbol.width(), symbol.height()]) else { continue };
+                    let id = format!("pat{layer}-{class}");
+                    if !self.patterns.contains_key(&id) {
+                        self.used.insert(pattern.symbol.0);
+                        let element = pattern_element(&id, symbol, pattern.symbol.0, cell, camera, style.fill, &format!("t{layer}-{class}"), &mut self.styles);
+                        self.patterns.insert(id.clone(), element);
+                    }
+                    // A colour pattern's alpha is multiplied by the fill's; a
+                    // mask's tint carries the fill's own.
+                    match symbol.kind {
+                        Kind::Colour if style.fill[3] < 1.0 => format!("url(#{id});opacity:{}", num(style.fill[3] as f64)),
+                        _ => format!("url(#{id})"),
+                    }
+                }
+            };
+            self.styles.entry(name).or_insert_with(|| format!("fill:{fill};stroke:none;fill-rule:nonzero"));
             let d = self.fills.entry(class).or_default();
             for (k, r) in rings.iter().enumerate() {
                 ring.clear();
@@ -157,57 +234,110 @@ impl SvgWriter {
             }
         }
 
-        // Outline segments chained into polylines, one path per class.
-        let lines = &mut self.lines;
-        let segments = mesh.outlines.chunks_exact(2);
-        let mut chain: Option<(u8, u32, u32)> = None; // class, first vertex, last vertex
-        let close = |lines: &mut BTreeMap<u8, String>, chain: Option<(u8, u32, u32)>| {
-            if let Some((class, first, last)) = chain
-                && first == last
-            {
-                lines.get_mut(&class).unwrap().push('Z');
-            }
+        // Outline segments chained into polylines (see the module docs).
+        let draws = |style: &Style| style.line_width > 0.0 && style.line[3] > 0.0;
+        let local = |i: u32| {
+            let v = &mesh.vertices[i as usize * 3..i as usize * 3 + 2];
+            [v[0] as f64, v[1] as f64]
         };
-        for s in segments {
+        let to_screen = |p: [f64; 2]| {
+            let f = &mesh.frame;
+            camera.map_to_screen([f.center[0] + p[0] * f.half_span, f.center[1] + p[1] * f.half_span])
+        };
+        let unit_px = mesh.frame.half_span / camera.units_per_px;
+        let mut chain: Option<Chain> = None;
+        for (k, s) in mesh.outlines.chunks_exact(2).enumerate() {
             let (a, b) = (s[0], s[1]);
             let class = class_of(a);
-            let style = palette.get(class);
-            if style.line_width <= 0.0 || style.line[3] <= 0.0 || !shown(a) {
+            if !draws(palette.get(class)) || !shown(a) {
                 continue;
             }
-            lines.entry(class).or_default();
-            match chain {
-                Some((c, first, last)) if c == class && last == a => chain = Some((c, first, b)),
-                _ => {
-                    close(lines, chain);
-                    let d = lines.get_mut(&class).unwrap();
-                    let [x, y] = screen(a);
-                    let _ = write!(d, "M{},{}", num(x), num(y));
-                    chain = Some((class, a, b));
+            if let Some(p) = mesh.partner(k) {
+                let pa = mesh.outlines[p * 2];
+                if shown(pa) && draws(palette.get(class_of(pa))) {
+                    continue;
                 }
             }
-            let d = lines.get_mut(&class).unwrap();
-            let [x, y] = screen(b);
-            let _ = write!(d, " {},{}", num(x), num(y));
+            let (la, lb) = (local(a), local(b));
+            // Along the tile's far edges, the neighbour's to write.
+            if (la[0] == 1.0 && lb[0] == 1.0) || (la[1] == 1.0 && lb[1] == 1.0) {
+                continue;
+            }
+            let Some((p, q)) = clip_to_own_area(la, lb) else { continue };
+            self.lines.entry(class).or_default();
+            if !matches!(&chain, Some(c) if c.class == class && p == la && c.last == Some(a)) {
+                if let Some(c) = chain.take() {
+                    c.finish(palette, &mut self.lines, &mut self.runs);
+                }
+                let along = mesh.distance(a) + (p[0] - la[0]).hypot(p[1] - la[1]);
+                let [x, y] = to_screen(p);
+                chain = Some(Chain { class, first: (p == la).then_some(a), last: None, along_px: along * unit_px, d: format!("M{},{}", num(x), num(y)) });
+            }
+            let c = chain.as_mut().unwrap();
+            let [x, y] = to_screen(q);
+            let _ = write!(c.d, " {},{}", num(x), num(y));
+            c.last = (q == lb).then_some(b);
         }
-        close(lines, chain);
-        for &class in lines.keys() {
+        if let Some(c) = chain.take() {
+            c.finish(palette, &mut self.lines, &mut self.runs);
+        }
+        for &class in self.lines.keys() {
             let style = palette.get(class);
             self.styles.entry(format!("l{layer}-{class}")).or_insert_with(|| {
-                format!("fill:none;stroke:{};stroke-width:{};stroke-linecap:round;stroke-linejoin:round", paint(style.line), num(style.line_width as f64))
+                let mut rule = format!("fill:none;stroke:{};stroke-width:{};stroke-linecap:round;stroke-linejoin:round", paint(style.line), num(style.line_width as f64));
+                if let Some(dash) = style.dash {
+                    let lengths: Vec<String> = dash.lengths().iter().map(|&l| num(l as f64)).collect();
+                    let _ = write!(rule, ";stroke-dasharray:{}", lengths.join(","));
+                    if dash.phase != 0.0 {
+                        let _ = write!(rule, ";stroke-dashoffset:{}", num(dash.phase as f64));
+                    }
+                }
+                rule
             });
         }
 
         for &i in &mesh.points {
             let class = class_of(i);
             let style = palette.get(class);
-            if style.point_size <= 0.0 || style.fill[3] <= 0.0 || !shown(i) {
+            // A point in the tile's own area, half open so a point on an
+            // edge belongs to one tile.
+            let local = &mesh.vertices[i as usize * 3..i as usize * 3 + 2];
+            let own = local.iter().all(|&v| (-1.0..1.0).contains(&v));
+            if style.point_size <= 0.0 || style.fill[3] <= 0.0 || !own || !shown(i) {
                 continue;
             }
             let [x, y] = screen(i);
-            let name = format!("p{layer}-{class}");
-            self.styles.entry(name.clone()).or_insert_with(|| format!("fill:{};stroke:none", paint(style.fill)));
-            let _ = writeln!(self.points, r#"<circle class="{name}" cx="{}" cy="{}" r="{}"/>"#, num(x), num(y), num(style.point_size as f64 / 2.0));
+            let Some(marker) = style.marker else {
+                let name = format!("p{layer}-{class}");
+                self.styles.entry(name.clone()).or_insert_with(|| format!("fill:{};stroke:none", paint(style.fill)));
+                let _ = writeln!(self.points, r#"<circle class="{name}" cx="{}" cy="{}" r="{}"/>"#, num(x), num(y), num(style.point_size as f64 / 2.0));
+                continue;
+            };
+            let Some(symbol) = self.symbols.get(&marker.symbol.0) else { continue };
+            let id = marker.symbol.0;
+            self.used.insert(id);
+            let (w, h) = (symbol.width(), symbol.height());
+            let mut turn = marker.rotation as f64;
+            if marker.align == Align::Map {
+                turn -= camera.bearing.to_degrees();
+            }
+            let mut transform = format!("translate({},{})", num(x), num(y));
+            if turn.rem_euclid(360.0) != 0.0 {
+                let _ = write!(transform, " rotate({})", num(turn));
+            }
+            let scale = style.point_size as f64 / w.max(h) as f64;
+            let [ax, ay] = symbol.anchor.map(|a| a as f64);
+            let _ = write!(transform, " scale({}) translate({},{})", fine(scale), num(-ax * w as f64), num(-ay * h as f64));
+            let name = format!("m{layer}-{class}");
+            if symbol.kind == Kind::Mask {
+                self.styles.entry(name.clone()).or_insert_with(|| format!("fill:{};stroke:none", paint(style.fill)));
+                let _ = writeln!(self.points, r#"<rect class="{name}" width="{w}" height="{h}" mask="url(#mask{id})" transform="{transform}"/>"#);
+            } else if style.fill[3] < 1.0 {
+                self.styles.entry(name.clone()).or_insert_with(|| format!("opacity:{}", num(style.fill[3] as f64)));
+                let _ = writeln!(self.points, r##"<use class="{name}" href="#sym{id}" transform="{transform}"/>"##);
+            } else {
+                let _ = writeln!(self.points, r##"<use href="#sym{id}" transform="{transform}"/>"##);
+            }
         }
     }
 
@@ -224,6 +354,29 @@ impl SvgWriter {
             }
             out.push_str("</style>\n");
         }
+        if !self.used.is_empty() {
+            out.push_str("<defs>\n");
+            for id in &self.used {
+                let symbol = &self.symbols[id];
+                let mask = symbol.kind == Kind::Mask;
+                let (w, h) = (symbol.width(), symbol.height());
+                // Either way a box of its pixels, so its `<use>`s don't change.
+                if let Some(markup) = symbol.markup() {
+                    let [vw, vh] = markup.size.map(|v| fine(v as f64));
+                    let _ = writeln!(out, r#"<svg id="sym{id}" width="{w}" height="{h}" viewBox="0 0 {vw} {vh}" preserveAspectRatio="none">{}</svg>"#, markup.svg);
+                } else {
+                    let png = png(w, h, symbol.pixels(), mask);
+                    let _ = writeln!(out, r#"<image id="sym{id}" width="{w}" height="{h}" href="data:image/png;base64,{}"/>"#, base64(&png));
+                }
+                if mask {
+                    let _ = writeln!(out, r##"<mask id="mask{id}" style="mask-type:alpha"><use href="#sym{id}"/></mask>"##);
+                }
+            }
+            for element in self.patterns.values() {
+                out.push_str(element);
+            }
+            out.push_str("</defs>\n");
+        }
         if let Some(bg) = self.background {
             let _ = writeln!(out, r#"<rect width="{w}" height="{h}" style="fill:{}"/>"#, paint(bg));
         }
@@ -231,6 +384,170 @@ impl SvgWriter {
         out.push_str("</svg>\n");
         out
     }
+}
+
+/// A fill's `<pattern>` of `symbol` (id `sid`), in repeats of `cell` pixels
+/// laid as on screen: along the map's axes from the map's origin, the one
+/// written being the repeat that holds the camera's centre, so its
+/// coordinates stay small however far the view is from the origin. A mask
+/// is the class's fill colour through it, styled as CSS class `tint`.
+#[allow(clippy::too_many_arguments)]
+fn pattern_element(id: &str, symbol: &Symbol, sid: u16, cell: [f64; 2], camera: &Camera, fill: [f32; 4], tint: &str, styles: &mut BTreeMap<String, String>) -> String {
+    let (w, h) = (symbol.width(), symbol.height());
+    let phase = pattern_phase(camera, cell);
+    let corner: [f64; 2] = std::array::from_fn(|i| camera.center[i] - phase[i] * camera.units_per_px);
+    // The repeat's top left corner: the map's axes turned as on screen,
+    // and the image's rows running south.
+    let [x, y] = camera.map_to_screen([corner[0], corner[1] + cell[1] * camera.units_per_px]);
+    let mut transform = format!("translate({},{})", num(x), num(y));
+    let turn = -camera.bearing.to_degrees();
+    if turn.rem_euclid(360.0) != 0.0 {
+        let _ = write!(transform, " rotate({})", fine(turn));
+    }
+    let _ = write!(transform, " scale({})", fine(cell[0] / w as f64));
+    let content = if symbol.kind == Kind::Mask {
+        styles.entry(tint.to_string()).or_insert_with(|| format!("fill:{};stroke:none", paint(fill)));
+        format!(r#"<rect class="{tint}" width="{w}" height="{h}" mask="url(#mask{sid})"/>"#)
+    } else {
+        format!(r##"<use href="#sym{sid}"/>"##)
+    };
+    format!("<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"{w}\" height=\"{h}\" patternTransform=\"{transform}\">{content}</pattern>\n")
+}
+
+/// A polyline of outline segments being written: its class, the vertex it
+/// began at and the one it reached, unless a tile edge cut them, how far
+/// along its line it starts in pixels, and its path data.
+struct Chain {
+    class: u8,
+    first: Option<u32>,
+    last: Option<u32>,
+    along_px: f64,
+    d: String,
+}
+
+impl Chain {
+    /// Closes the chain if it came back to its start, and adds it to its
+    /// class's path, or for a dash that it starts part-way through, to the
+    /// runs that take paths of their own.
+    fn finish(mut self, palette: &Palette, lines: &mut BTreeMap<u8, String>, runs: &mut BTreeMap<u8, Vec<(f64, String)>>) {
+        if self.first.is_some() && self.first == self.last {
+            self.d.push('Z');
+        }
+        if let Some(dash) = palette.get(self.class).dash {
+            let sum: f64 = dash.lengths().iter().map(|&l| l as f64).sum();
+            let period = if dash.lengths().len() % 2 == 1 { 2.0 * sum } else { sum };
+            let into = self.along_px.rem_euclid(period);
+            // Within a hundredth of a pixel, as `num` writes it.
+            if into >= 0.005 && period - into >= 0.005 {
+                let offset = (dash.phase as f64 + into).rem_euclid(period);
+                runs.entry(self.class).or_default().push((offset, self.d));
+                return;
+            }
+        }
+        lines.get_mut(&self.class).unwrap().push_str(&self.d);
+    }
+}
+
+/// The part of segment `a`--`b` inside the tile's own square, `|x|, |y| <=
+/// 1` in local units (Liang--Barsky), or `None`. Ends inside stay exactly as
+/// they were.
+fn clip_to_own_area(a: [f64; 2], b: [f64; 2]) -> Option<([f64; 2], [f64; 2])> {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for axis in 0..2 {
+        for (p, q) in [(-d[axis], a[axis] + 1.0), (d[axis], 1.0 - a[axis])] {
+            if p == 0.0 {
+                if q < 0.0 {
+                    return None;
+                }
+            } else {
+                let r = q / p;
+                if p < 0.0 {
+                    t0 = t0.max(r);
+                } else {
+                    t1 = t1.min(r);
+                }
+            }
+        }
+    }
+    if t0 >= t1 {
+        return None;
+    }
+    let at = |t: f64| [(a[0] + t * d[0]).clamp(-1.0, 1.0), (a[1] + t * d[1]).clamp(-1.0, 1.0)];
+    Some((if t0 == 0.0 { a } else { at(t0) }, if t1 == 1.0 { b } else { at(t1) }))
+}
+
+/// An RGBA8 PNG of `pixels`, its deflate blocks stored uncompressed, so it
+/// needs no compressor. White where `white`, keeping only the alpha.
+fn png(w: u32, h: u32, pixels: &[u8], white: bool) -> Vec<u8> {
+    let mut raw = Vec::with_capacity(pixels.len() + h as usize);
+    for row in pixels.chunks_exact(w as usize * 4) {
+        raw.push(0); // no filter
+        if white {
+            raw.extend(row.chunks_exact(4).flat_map(|p| [255, 255, 255, p[3]]));
+        } else {
+            raw.extend_from_slice(row);
+        }
+    }
+    // zlib: a header, stored blocks of at most 65,535 bytes, the Adler-32.
+    let mut z = vec![0x78, 0x01];
+    let blocks = raw.chunks(65535);
+    let last = blocks.len().max(1) - 1;
+    for (k, block) in raw.chunks(65535).enumerate() {
+        let n = block.len() as u16;
+        z.push((k == last) as u8);
+        z.extend_from_slice(&n.to_le_bytes());
+        z.extend_from_slice(&(!n).to_le_bytes());
+        z.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &raw {
+        a = (a + byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    z.extend_from_slice(&(b << 16 | a).to_be_bytes());
+
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let start = out.len();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let crc = crc32(&out[start..]);
+        out.extend_from_slice(&crc.to_be_bytes());
+    };
+    let mut header = Vec::with_capacity(13);
+    header.extend_from_slice(&w.to_be_bytes());
+    header.extend_from_slice(&h.to_be_bytes());
+    header.extend_from_slice(&[8, 6, 0, 0, 0]); // 8 bits, RGBA, deflate, no filter, no interlace
+    chunk(b"IHDR", &header);
+    chunk(b"IDAT", &z);
+    chunk(b"IEND", &[]);
+    out
+}
+
+/// The CRC-32 PNG chunks end with.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { 0xedb8_8320 ^ (crc >> 1) } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for group in bytes.chunks(3) {
+        let n = group.iter().enumerate().fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= group.len() { ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
 }
 
 /// Twice a ring's signed area by the shoelace formula: positive when it
@@ -257,6 +574,15 @@ fn num(v: f64) -> String {
     s
 }
 
+/// A scale or an angle to a millionth, without trailing zeros: a hundredth
+/// of a 48-pixel image's scale would move its far edge by half a pixel, and
+/// a hundredth of a degree a pattern's repeats a viewport away by a fifth.
+fn fine(v: f64) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".into() } else { s.into() }
+}
+
 /// A straight-alpha RGBA colour as CSS: `#rrggbb`, with an opacity when it
 /// is not opaque.
 fn paint(c: [f32; 4]) -> String {
@@ -281,7 +607,7 @@ mod tests {
 
     fn palette() -> Palette {
         let mut p = Palette::new();
-        p.set(1, Style { fill: [1.0, 0.0, 0.0, 1.0], line: [0.0, 0.0, 1.0, 0.5], line_width: 2.0, point_size: 6.0 });
+        p.set(1, Style { fill: [1.0, 0.0, 0.0, 1.0], line: [0.0, 0.0, 1.0, 0.5], line_width: 2.0, point_size: 6.0, ..Style::default() });
         p
     }
 
@@ -384,6 +710,77 @@ mod tests {
         b.finish()
     }
 
+    /// The `d` of every path of class `name`, joined.
+    fn path_data(out: &str, name: &str) -> String {
+        let key = format!("class=\"{name}\"");
+        out.lines().filter(|l| l.starts_with("<path") && l.contains(&key)).filter_map(|l| l.split(" d=\"").nth(1)).map(|d| d.trim_end_matches("\"/>")).collect()
+    }
+
+    #[test]
+    fn a_line_in_two_tiles_guard_bands_is_written_once() {
+        use crate::grid::TileFrame;
+        use crate::prepare::Detail;
+        let cam = camera();
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        for cx in [50.0, 150.0] {
+            let frame = TileFrame { center: [cx, 50.0], half_span: 50.0 };
+            let mut b = MeshBuilder::new(frame, Detail { tile_px: 100.0, grid_px: 0.25, guard_px: 10.0 });
+            b.set_class(1);
+            b.begin_line();
+            b.points(&[[20.0, 50.0], [180.0, 50.0]]);
+            b.end_line();
+            svg.draw(&b.finish(), &cam, &palette());
+        }
+        // Each tile its own half, where each would reach 10 into the other.
+        assert_eq!(path_data(&svg.finish(), "l0-1"), "M20,50 100,50M100,50 180,50");
+    }
+
+    #[test]
+    fn a_dashed_chain_part_way_through_its_pattern_has_its_own_offset() {
+        let cam = camera();
+        let mut b = MeshBuilder::for_view(&cam);
+        b.set_class(1);
+        b.begin_line();
+        b.points(&[[10.0, 20.0], [60.0, 20.0]]);
+        b.end_line();
+        b.set_line_start(7.0);
+        b.begin_line();
+        b.points(&[[10.0, 40.0], [60.0, 40.0]]);
+        b.end_line();
+        let mut palette = palette();
+        palette.set(1, Style { dash: crate::Dash::new(&[4.0, 2.0], 1.0), ..*palette.get(1) });
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.draw(&b.finish(), &cam, &palette);
+        let out = svg.finish();
+        assert!(out.contains(";stroke-dasharray:4,2;stroke-dashoffset:1}"), "{out}");
+        // The first line shares the class's path; the second starts 7
+        // along, so 1 + 7 into a pattern of 6.
+        assert!(out.contains(r#"<path class="l0-1" d="M10,80 60,80"/>"#), "{out}");
+        assert!(out.contains(r#"<path class="l0-1" style="stroke-dashoffset:2" d="M10,60 60,60"/>"#), "{out}");
+    }
+
+    #[test]
+    fn a_shared_border_is_written_once_and_whole_through_a_state() {
+        let cam = camera();
+        let mut b = MeshBuilder::for_view(&cam);
+        b.set_class(1);
+        for (id, x) in [(1, 10.0), (2, 50.0)] {
+            b.set_feature(id);
+            b.begin_polygon();
+            b.begin_ring();
+            b.points(&[[x, 10.0], [x + 40.0, 10.0], [x + 40.0, 40.0], [x, 40.0], [x, 10.0]]);
+            b.end_ring();
+            b.end_polygon();
+        }
+        let mesh = b.finish();
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.draw(&mesh, &cam, &palette());
+        // The first square's right side is left to the second.
+        assert_eq!(path_data(&svg.finish(), "l0-1"), "M10,90 50,90M50,60 10,60 10,90M50,90 90,90 90,60 50,60 50,90Z");
+        // Only the first holding the state: it writes the side itself.
+        assert_eq!(path_data(&write_state(&mesh, &cam, 1, &[1, 0], 1), "l1-1"), "M10,90 50,90 50,60 10,60 10,90Z");
+    }
+
     fn write_state(mesh: &Mesh, cam: &Camera, first: u32, flags: &[u8], mask: u8) -> String {
         let mut svg = SvgWriter::new(cam.size_px, None);
         svg.begin_layer();
@@ -440,6 +837,280 @@ mod tests {
         svg.begin_layer();
         svg.draw(&mesh, &cam, &palette());
         assert_eq!(write_state(&mesh, &cam, 10, &[1, 1, 1], 1), svg.finish());
+    }
+
+    /// Symbols for markers: a 4 x 2 colour image, and a 2 x 4 mask anchored
+    /// at its bottom middle.
+    fn symbols() -> (Symbols, crate::SymbolId, crate::SymbolId) {
+        let mut symbols = Symbols::new();
+        let colour = symbols.add(Symbol::new(4, 2, [10, 20, 30, 255].repeat(8)).unwrap()).unwrap();
+        let mut pin = Symbol::new(2, 4, [10, 20, 30, 128].repeat(8)).unwrap();
+        pin.kind = Kind::Mask;
+        pin.anchor = [0.5, 1.0];
+        let pin = symbols.add(pin).unwrap();
+        (symbols, colour, pin)
+    }
+
+    fn marker_palette(colour: crate::SymbolId, pin: crate::SymbolId) -> Palette {
+        use crate::style::Marker;
+        let mut p = Palette::new();
+        let fill = [0.0, 0.0, 1.0, 1.0];
+        p.set(1, Style { fill, point_size: 8.0, marker: Some(Marker { rotation: 30.0, ..Marker::new(colour) }), ..Style::default() });
+        p.set(2, Style { fill, point_size: 8.0, marker: Some(Marker { rotation: 30.0, align: Align::Map, ..Marker::new(colour) }), ..Style::default() });
+        p.set(3, Style { fill: [1.0, 0.0, 0.0, 0.5], point_size: 8.0, marker: Some(Marker::new(pin)), ..Style::default() });
+        p
+    }
+
+    #[test]
+    fn markers_are_uses_of_one_definition_each() {
+        let (symbols, colour, pin) = symbols();
+        let mut cam = camera();
+        cam.bearing = std::f64::consts::FRAC_PI_2;
+        let mut b = MeshBuilder::for_view(&cam);
+        for class in 1..=3 {
+            b.set_class(class);
+            b.point([100.0, 50.0]);
+            b.point([110.0, 50.0]);
+        }
+        let mesh = b.finish();
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.symbols(&symbols);
+        svg.begin_layer();
+        svg.draw(&mesh, &cam, &marker_palette(colour, pin));
+        let out = svg.finish();
+        // Each symbol once, the mask's with its mask.
+        assert_eq!(out.matches("<image id=\"sym0\"").count(), 1, "{out}");
+        assert_eq!(out.matches("<image id=\"sym1\"").count(), 1, "{out}");
+        assert!(out.contains(r##"<mask id="mask1" style="mask-type:alpha"><use href="#sym1"/></mask>"##), "{out}");
+        // Longest side 8 for an image of 4: scale 2, about the centre. On
+        // the screen its rotation holds; on the map it turns back by the
+        // bearing.
+        assert!(out.contains(r##"<use href="#sym0" transform="translate(100,50) rotate(30) scale(2) translate(-2,-1)"/>"##), "{out}");
+        assert!(out.contains(r##"<use href="#sym0" transform="translate(100,50) rotate(-60) scale(2) translate(-2,-1)"/>"##), "{out}");
+        // The mask: the class's fill through it, anchored at its foot.
+        assert!(out.contains(r#"<rect class="m1-3" width="2" height="4" mask="url(#mask1)" transform="translate(100,50) scale(2) translate(-1,-4)"/>"#), "{out}");
+        assert!(out.contains(".m1-3{fill:#ff0000;opacity:0.5;stroke:none}"), "{out}");
+        assert_eq!(out.matches("<use href=\"#sym0\"").count(), 4, "{out}");
+        // A symbol not given draws nothing.
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.begin_layer();
+        svg.draw(&mesh, &cam, &marker_palette(colour, pin));
+        assert!(!svg.finish().contains("<use"));
+    }
+
+    /// A square of each of `classes` around the camera's centre, `half`
+    /// map units across.
+    fn squares(cam: &Camera, classes: &[u8], half: f64) -> Mesh {
+        let mut b = MeshBuilder::for_view(cam);
+        let [x, y] = cam.center;
+        for &class in classes {
+            b.set_class(class);
+            b.begin_polygon();
+            b.begin_ring();
+            b.points(&[[x - half, y - half], [x + half, y - half], [x + half, y + half], [x - half, y + half], [x - half, y - half]]);
+            b.end_ring();
+            b.end_polygon();
+        }
+        b.finish()
+    }
+
+    fn write_patterns(cam: &Camera, palette: &Palette, symbols: Option<&Symbols>) -> String {
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        if let Some(symbols) = symbols {
+            svg.symbols(symbols);
+        }
+        svg.begin_layer();
+        let mesh = squares(cam, &[1, 2, 3], 20.0 * cam.units_per_px);
+        svg.draw(&mesh, cam, palette);
+        // A second draw, as of another tile, writes each pattern once.
+        svg.draw(&mesh, cam, palette);
+        svg.finish()
+    }
+
+    #[test]
+    fn a_pattern_is_its_symbol_repeated_from_the_map_origin() {
+        use crate::style::Pattern;
+        let (symbols, colour, pin) = symbols();
+        let mut p = Palette::new();
+        p.set(1, Style { fill: [0.0, 0.0, 1.0, 1.0], pattern: Some(Pattern::new(colour, 8.0)), ..Style::default() });
+        // The camera's centre 3 and 1 pixels east and north of a repeat's
+        // south-west corner: the repeat's top left at (97, 47).
+        let cam = Camera::new([1003.0, 2005.0], 1.0, [200, 100]);
+        let out = write_patterns(&cam, &p, Some(&symbols));
+        assert!(out.contains(r##"<pattern id="pat1-1" patternUnits="userSpaceOnUse" width="4" height="2" patternTransform="translate(97,47) scale(2)"><use href="#sym0"/></pattern>"##), "{out}");
+        assert!(out.contains(".f1-1{fill:url(#pat1-1);stroke:none;fill-rule:nonzero}"), "{out}");
+        assert_eq!((out.matches("<pattern ").count(), out.matches("<image id=\"sym0\"").count()), (1, 1), "{out}");
+
+        // A mask takes the fill's colour, and a translucent colour pattern
+        // the fill's alpha; far from the origin, turned, at street level.
+        p.set(2, Style { fill: [1.0, 0.0, 0.0, 0.5], pattern: Some(Pattern::new(pin, 8.0)), ..Style::default() });
+        p.set(3, Style { fill: [0.0, 0.0, 1.0, 0.25], pattern: Some(Pattern::new(colour, 8.0)), ..Style::default() });
+        let mut cam = Camera::new([20_000_000.3, -3_000_000.9], 0.1, [200, 100]);
+        cam.bearing = 0.4;
+        let out = write_patterns(&cam, &p, Some(&symbols));
+        assert!(out.contains(r#"<rect class="t1-2" width="2" height="4" mask="url(#mask1)"/></pattern>"#), "{out}");
+        assert!(out.contains(".t1-2{fill:#ff0000;opacity:0.5;stroke:none}"), "{out}");
+        assert!(out.contains(".f1-2{fill:url(#pat1-2);stroke:none;fill-rule:nonzero}"), "{out}");
+        assert!(out.contains(".f1-3{fill:url(#pat1-3);opacity:0.25;stroke:none;fill-rule:nonzero}"), "{out}");
+        assert!(out.contains(r#"<mask id="mask1""#), "{out}");
+        // Each repeat's top left corner is on the screen near the centre,
+        // and is a map point a whole number of repeats from the origin.
+        for (id, cell) in [("pat1-2", [4.0, 8.0]), ("pat1-3", [8.0, 4.0])] {
+            let at = out.find(&format!(r#"<pattern id="{id}""#)).unwrap();
+            let transform = &out[at..].split("patternTransform=\"translate(").nth(1).unwrap();
+            let (xy, rest) = transform.split_once(')').unwrap();
+            assert!(rest.starts_with(" rotate(-22.918312) scale(2)"), "{rest}");
+            let [x, y]: [f64; 2] = xy.split(',').map(|v| v.parse().unwrap()).collect::<Vec<_>>().try_into().unwrap();
+            assert!(x.abs() < 300.0 && y.abs() < 300.0, "{id}: {x}, {y}");
+            let m = cam.screen_to_map([x, y]);
+            for i in 0..2 {
+                let into = (m[i] / cam.units_per_px).rem_euclid(cell[i]);
+                assert!(into.min(cell[i] - into) < 0.01, "{id}: {into} into a repeat of {}", cell[i]);
+            }
+        }
+
+        // A symbol not given, or a repeat that isn't positive, draws nothing.
+        assert!(!write_patterns(&cam, &p, None).contains("<path"));
+        p.set(1, Style { fill: [0.0, 0.0, 1.0, 1.0], pattern: Some(Pattern::new(colour, 0.0)), ..Style::default() });
+        p.set(2, Style::default());
+        p.set(3, Style::default());
+        assert!(!write_patterns(&cam, &p, Some(&symbols)).contains("<path"));
+    }
+
+    /// Writes a point of class 1, and a square of class 2 around it, with
+    /// `marker` and `pattern` drawing from `symbols`.
+    #[cfg(feature = "symbols")]
+    fn write_symbols(symbols: &Symbols, marker: crate::SymbolId, pattern: crate::SymbolId) -> String {
+        use crate::style::{Marker, Pattern};
+        let cam = camera();
+        let mut p = Palette::new();
+        p.set(1, Style { fill: [1.0, 0.0, 0.0, 1.0], point_size: 8.0, marker: Some(Marker::new(marker)), ..Style::default() });
+        p.set(2, Style { fill: [0.0, 0.0, 1.0, 1.0], pattern: Some(Pattern::new(pattern, 8.0)), ..Style::default() });
+        let mut b = MeshBuilder::for_view(&cam);
+        b.set_class(1);
+        b.point([100.0, 50.0]);
+        b.set_class(2);
+        b.begin_polygon();
+        b.begin_ring();
+        b.points(&[[60.0, 20.0], [140.0, 20.0], [140.0, 80.0], [60.0, 80.0], [60.0, 20.0]]);
+        b.end_ring();
+        b.end_polygon();
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.symbols(symbols);
+        svg.draw(&b.finish(), &cam, &p);
+        svg.finish()
+    }
+
+    #[cfg(feature = "symbols")]
+    const GRADIENT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><defs><linearGradient id="a"><stop offset="0" stop-color="COLOUR"/><stop offset="1" stop-color="white"/></linearGradient></defs><rect width="8" height="8" fill="url(#a)"/></svg>"#;
+
+    #[cfg(feature = "symbols")]
+    #[test]
+    fn a_symbol_from_markup_is_written_as_its_markup() {
+        let icon = GRADIENT.replace("COLOUR", "red");
+        let mut symbols = Symbols::new();
+        let from_svg = symbols.add(Symbol::from_svg(&icon, 4.0, 1.0, Kind::Colour).unwrap()).unwrap();
+        let from_pixels = symbols.add(Symbol::new(4, 4, [10, 20, 30, 255].repeat(16)).unwrap()).unwrap();
+        let markup = symbols.get(from_svg).unwrap().markup().unwrap().svg.clone();
+        // The markup in a box of its pixels; the pixels as a PNG.
+        let out = write_symbols(&symbols, from_svg, from_pixels);
+        assert!(out.contains(&format!(r#"<svg id="sym0" width="4" height="4" viewBox="0 0 8 8" preserveAspectRatio="none">{markup}</svg>"#)), "{out}");
+        assert!(out.contains(r#"<image id="sym1" width="4" height="4" href="data:image/png;base64,"#), "{out}");
+        // Each is placed the same way whichever it is.
+        let swapped = write_symbols(&symbols, from_pixels, from_svg);
+        let uses = |out: &str| out.lines().filter(|l| l.contains("<use ") || l.starts_with("<pattern ")).map(|l| l.replace("sym0", "symN").replace("sym1", "symN")).collect::<Vec<_>>();
+        assert_eq!(uses(&out), uses(&swapped));
+        assert!(out.contains(r##"<use href="#sym0" transform="translate(100,50) scale(2) translate(-2,-2)"/>"##), "{out}");
+    }
+
+    #[cfg(feature = "symbols")]
+    #[test]
+    fn two_icons_defining_one_id_keep_their_own() {
+        let mut symbols = Symbols::new();
+        let red = symbols.add(Symbol::from_svg(&GRADIENT.replace("COLOUR", "red"), 4.0, 1.0, Kind::Colour).unwrap()).unwrap();
+        let blue = symbols.add(Symbol::from_svg(&GRADIENT.replace("COLOUR", "blue"), 4.0, 1.0, Kind::Colour).unwrap()).unwrap();
+        let out = write_symbols(&symbols, red, blue);
+        // Each symbol's gradient is the one it defines.
+        let gradient_of = |id: &str, colour: &str| {
+            let at = out.find(&format!(r#"<svg id="{id}""#)).unwrap();
+            let def = &out[at..at + out[at..].find("\n").unwrap()];
+            let name = def.split("<linearGradient id=\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+            assert!(name.ends_with("-a") && def.contains(&format!("fill=\"url(#{name})\"")) && def.contains(colour), "{def}");
+            name
+        };
+        let (a, b) = (gradient_of("sym0", "#ff0000"), gradient_of("sym1", "#0000ff"));
+        assert_ne!(a, b);
+        assert_eq!(out.matches(&format!("id=\"{a}\"")).count(), 1, "{out}");
+    }
+
+    #[cfg(feature = "symbols")]
+    #[test]
+    fn a_masks_markup_is_white() {
+        let pin = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4" fill="currentColor"/></svg>"#;
+        let mut symbols = Symbols::new();
+        let mask = symbols.add(Symbol::from_svg(pin, 4.0, 1.0, Kind::Mask).unwrap()).unwrap();
+        let out = write_symbols(&symbols, mask, mask);
+        let at = out.find(r#"<svg id="sym0""#).unwrap();
+        let def = &out[at..at + out[at..].find('\n').unwrap()];
+        assert!(def.contains(r##"fill="#ffffff""##) && !def.contains("#000000"), "{def}");
+        assert!(out.contains(r##"<mask id="mask0" style="mask-type:alpha"><use href="#sym0"/></mask>"##), "{out}");
+        assert!(out.contains(r#"<rect class="m0-1" width="4" height="4" mask="url(#mask0)""#), "{out}");
+    }
+
+    #[cfg(feature = "symbols")]
+    #[test]
+    fn a_root_at_another_aspect_fills_the_pixels_box() {
+        // 30 x 10 to a longest side of 4: 4 x 1.33, rounded to 4 x 1.
+        let wide = r#"<svg xmlns="http://www.w3.org/2000/svg" width="30" height="10"><rect width="30" height="10"/></svg>"#;
+        let mut symbols = Symbols::new();
+        let id = symbols.add(Symbol::from_svg(wide, 4.0, 1.0, Kind::Colour).unwrap()).unwrap();
+        let out = write_symbols(&symbols, id, id);
+        assert!(out.contains(r#"<svg id="sym0" width="4" height="1" viewBox="0 0 30 10" preserveAspectRatio="none"><svg width="30" height="10""#), "{out}");
+    }
+
+    #[test]
+    fn a_point_in_two_guard_bands_is_written_once() {
+        use crate::grid::TileFrame;
+        use crate::prepare::Detail;
+        let cam = camera();
+        let tile = |cx: f64| {
+            let frame = TileFrame { center: [cx, 50.0], half_span: 50.0 };
+            let mut b = MeshBuilder::new(frame, Detail { tile_px: 100.0, grid_px: 0.25, guard_px: 10.0 });
+            b.set_class(1);
+            b.point([103.0, 50.0]);
+            b.finish()
+        };
+        let tiles = [tile(50.0), tile(150.0)];
+        assert!(tiles.iter().all(|t| t.points.len() == 1));
+        let mut svg = SvgWriter::new(cam.size_px, None);
+        svg.begin_layer();
+        for t in &tiles {
+            svg.draw(t, &cam, &palette());
+        }
+        assert_eq!(svg.finish().matches("<circle").count(), 1);
+    }
+
+    #[test]
+    fn a_png_is_whole() {
+        let pixels = [1, 2, 3, 4, 5, 6, 7, 8];
+        let out = png(2, 1, &pixels, false);
+        assert_eq!(&out[..8], b"\x89PNG\r\n\x1a\n");
+        // IHDR: 2 x 1, 8-bit RGBA, and its CRC over type and data.
+        assert_eq!(&out[8..29], &[0, 0, 0, 13, b'I', b'H', b'D', b'R', 0, 0, 0, 2, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+        assert_eq!(&out[29..33], &crc32(&out[12..29]).to_be_bytes());
+        // IDAT: one stored block of the filter byte and the row, then the
+        // Adler-32 of the same nine bytes.
+        let idat = &out[33..];
+        assert_eq!(&idat[4..8], b"IDAT");
+        assert_eq!(&idat[8..10], &[0x78, 0x01]);
+        assert_eq!(&idat[10..15], &[1, 9, 0, 0xf6, 0xff]);
+        assert_eq!(&idat[15..24], &[0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(&idat[24..28], &[0x00, 0x81, 0x00, 0x25]);
+        assert!(out.ends_with(&[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82]));
+        // A mask is white, its alpha kept.
+        assert_eq!(&png(2, 1, &pixels, true)[48..57], &[0, 255, 255, 255, 4, 255, 255, 255, 8]);
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+        assert_eq!([base64(b"M"), base64(b"Ma"), base64(b"Man")], ["TQ==", "TWE=", "TWFu"]);
     }
 
     #[test]

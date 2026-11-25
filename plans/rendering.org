@@ -145,6 +145,16 @@ set, so decimation barely shows on it (79% of points kept at level 3); a
 Fine levels emit more vertices than they read (148% at level 9): clipping
 adds points where borders cross tile edges, and each tile keeps its own.
 
+/Distances and shared borders, 2026-11-23 (0.3.0;
+plans/custom-symbols.org § Dashes):/ each vertex also carries its distance
+along its line or ring (=Mesh::distances=), measured before clipping, for
+dashes; and =finish= matches ring edges that two rings share, so a shared
+border is drawn once (=Mesh::partners=). =Mesh= is =#[non_exhaustive]=,
+built by =MeshBuilder= or =Mesh::new=. Distances are =f64=, the one buffer
+that isn't =f32=: far along a long line they run to millions of pixels.
+=MeshBuilder::line_length= measures a line as a tile at its level does, so
+a line handed in as pieces starts each where the one before ends, exactly.
+
 Prepared tiles are flat =Vec<f32>= / =Vec<u32>= buffers. In the browser they
 cross from a Web Worker to the main thread as zero-copy transferable
 =ArrayBuffer=s, which is the only parallelism wasm has without COOP/COEP
@@ -237,6 +247,15 @@ a 256 x 3 =RGBA32F= texture (fill row, line row, width and point-size row)
 read by =texelFetch=; =update_palette= restyles in one upload. Visibility
 and min/max zoom are the embedder's for now: it chooses which layers to
 draw.
+
+/Symbols, 2026-11-21 (0.3.0):/ =Style= gains a marker, a
+dash and a pattern, each naming a symbol by id from a =Symbols= atlas
+(=src/symbol.rs=), and is =#[non_exhaustive]=: an embedder builds one from
+=Style::default()= and assigns. The palette texture is 256 x 7. The design
+and what draws them is plans/custom-symbols.org: markers draw (step 2,
+2026-11-21), and so do dashes (step 3, 2026-11-23) and pattern fills
+(step 4, 2026-11-24); with the =symbols= feature, =Symbol::from_svg= makes
+one from SVG markup, which SVG output writes back (step 5, 2026-11-24).
 
 /Zoom-dependent values, 2026-10-30:/ a =circle-radius= can follow
 =["interpolate", ["linear"], ["zoom"], 3, 1, 10, 5]=. =style::interpolate(stops,
@@ -425,7 +444,8 @@ What the charter does cost:
 | =tiny-skia= | =raster= | PNG export, server-side raster tiles |
 
 Not a backend but also feature-gated: =mvt= (decoder, no dependency;
-§ V1 FEATURES) and =text= (glyphs; § LABELS).
+§ V1 FEATURES), =symbols= (=resvg=: icons from SVG markup;
+plans/custom-symbols.org) and =text= (glyphs; § LABELS).
 
 - =glow= over =wgpu=: a thin, pure-Rust GL binding that covers WebGL2 and
   native GL and adds tens of KB to a wasm build rather than megabytes. WebGPU
@@ -434,6 +454,12 @@ Not a backend but also feature-gated: =mvt= (decoder, no dependency;
   =f32= data.
 - *Native windowing is the embedder's.* An example under =examples/= using
   =winit= + =glutin= (dev-dependencies only) is the reference embedder.
+- *So is the GL context; nazca wraps it.* Since 0.3.0 every =gl= call takes
+  a =gl::Context=, made from a browser's =WebGl2RenderingContext= or a
+  native loader, and =glow= is not in the API (plans/gl-context.org). An
+  embedder with GL calls of its own keeps its own binding over the same
+  context, and restores the frame's state that =begin_frame= set if it
+  calls between draws (=gl.rs='s module docs).
 
 /The =glow= backend, implemented 2026-10-30 (=src/gl.rs=):/
 - *Fills*: the mesh's triangles, coloured from the palette texture.
@@ -443,6 +469,9 @@ Not a backend but also feature-gated: =mvt= (decoder, no dependency;
   gives round caps and joins with no neighbour information. Points are the
   same quad around a zero-length segment: a dot of =point_size= in the fill
   colour.
+- *Points*, since 2026-11-21 (0.3.0): a program of their
+  own draws the same dot, or the class's marker, a symbol from the
+  renderer's atlas (plans/custom-symbols.org § Markers).
 - *Each pixel belongs to one tile*, by stencil: a tile *claims* its square's
   unclaimed pixels (0 -> 2), draws only there (== 2), then *settles* them
   (-> 1). Tiles drawn finest first keep their area from coarser stand-ins;
@@ -452,8 +481,13 @@ Not a backend but also feature-gated: =mvt= (decoder, no dependency;
   stencil. The context needs a stencil buffer (WebGL leaves it out unless
   asked). Verified with translucent fills over 16 tiles: no tile edge shows.
 - *Known limits*: a translucent line blends twice where segments' round ends
-  overlap (darker dots at vertices), and a border two polygons share is
-  outlined by both. Neither shows with opaque lines.
+  overlap (darker dots at vertices), which doesn't show with opaque lines.
+  /Changed 2026-11-23, with dashes (plans/custom-symbols.org § OPEN
+  QUESTIONS 9):/ a border two polygons share was outlined by both; it is
+  now drawn once, by the last feature fed that outlines it. Dashes
+  thousands of kilometres along a line, at the deepest levels, jump by up
+  to about a pixel where one tile's run of segments meets the next
+  (plans/custom-symbols.org § Dashes, /Far along a line/).
 - /Changed 2026-10-30, with the SVG backend: no separate draw-command
   buffer./ The prepared =Mesh= is already flat =f32= / =u32= buffers, and it
   is what both backends replay. The GPU takes its triangles and outline

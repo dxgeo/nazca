@@ -52,14 +52,18 @@ fn main() {
         }
     }
     let mut basemap_style = Palette::new();
-    basemap_style.set(1, Style { fill: [0.91, 0.89, 0.85, 1.0], line: [0.72, 0.70, 0.63, 1.0], line_width: 0.8, point_size: 0.0 });
+    let mut land = Style::default();
+    land.fill = [0.91, 0.89, 0.85, 1.0];
+    land.line = [0.72, 0.70, 0.63, 1.0];
+    land.line_width = 0.8;
+    basemap_style.set(1, land);
     svg.begin_layer();
     svg.draw(&basemap.finish(), &camera, &basemap_style);
 
     // The counties, prepared for this page.
     let mut mesh = MeshBuilder::for_view(&camera);
     counties.prepare_into(&mut mesh, camera.visible_bounds());
-    let mut palette = data::palette();
+    let mut palette = data::palette(data::Markers::None, data::Outlines::Solid, &data::icons());
     for class in 1..=6 {
         let mut s = *palette.get(class);
         s.fill[3] = 0.85;

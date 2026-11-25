@@ -4,12 +4,34 @@
 
 * Custom Symbols
 
-** STATUS -- proposal, written 2026-11-19
-Nothing here is decided but what § OPEN QUESTIONS marks so. § DESIGN is the
-recommendation, § OPEN QUESTIONS lists what needs a decision, and § STEPS
-builds it one kind of symbol at a
-time. Markers, dashes and pattern fills are three parts that share an atlas
-and a palette layout, so each can ship once the shared step is in.
+** STATUS -- steps 0 to 6 decided 2026-11-20 (user decision), building
+Written 2026-11-19 as a proposal. § OPEN QUESTIONS 1 to 6, 8 and 9 are decided, and
+steps 0 to 6 are being built for 0.3.0, on the =custom-symbols= branch. Step
+0 is built (2026-11-20). Step 1 is built (2026-11-21), with the atlas's
+padding and mipmaps, its premultiplied pixels and its limits decided for
+it. Step 2 is built (2026-11-21): markers draw, pick and write SVG from
+pixels, natively and in Chrome's WebGL2, and the spike's views without
+markers are byte-identical to step 1's. Their SVG markup moved to step 5
+(§ OPEN QUESTIONS 8, decided 2026-11-22). Step 3, reviewed 2026-11-22
+(shared borders drawn once, § OPEN QUESTIONS 9), is built (2026-11-23)
+and checked natively and in Chrome's WebGL2. Its two additions, decided
+2026-11-23 (user decision) from its measurements (§ CHECKS), are built
+(2026-11-23) and checked natively and in Chrome's WebGL2: the far line
+start's jitter cured by a run's shared base, and
+=MeshBuilder::line_length=, measuring a line as nazca does, so a line
+start joins exactly. Step 4, pattern fills, is built (2026-11-24) and checked natively and in
+Chrome's WebGL2 (=--check-patterns=, T in the browser); the spike's views without
+patterns are byte-identical to step 3's. Step 5, =Symbol::from_svg= and
+its markup in SVG output, is built (2026-11-24) and checked natively, in
+=resvg= and in Chrome, its markers in Chrome's WebGL2; the spike's views
+without markup are byte-identical to step 4's. Step 6, the README and
+0.3.0, is written (2026-11-25). Step 7, vector symbols, is in 0.3.0 too,
+decided 2026-11-25 (user decision): the pull request into =main= waits for
+it, and step 6's README and release notes gain it. It waits on § OPEN
+QUESTIONS 7. § STEPS builds one kind of
+symbol at a time. Markers, dashes and pattern fills are three parts that
+share an atlas and a palette layout, so each can be built once the shared
+step is in.
 
 ** THE PROBLEM
 A style class draws one of three looks (plans/rendering.org § STYLING): a
@@ -77,14 +99,30 @@ Measured against =src/= at 0.2.1:
     multiplies its alpha, so fading a class's fill fades its markers too.
   - /Mask/: only its alpha is used, tinted by a colour from the class. One
     hatch or one pin serves every colour a palette gives it.
-  It may also carry SVG markup, which only the SVG writer reads
-  (§ SVG output).
+  One built by =Symbol::from_svg= also carries =usvg='s markup for it,
+  which only the SVG writer reads (§ SVG output, § OPEN QUESTIONS 8).
 - *=Symbols= holds them by id.* =Symbols::add= returns a =SymbolId= (a
   =u16=) and packs the image into an atlas on the CPU, in shelves with a
   padding around each image. The atlas is plain bytes and a rectangle per
   id, so the SVG writer and the GPU agree on ids without a GPU in the room.
   An id is never reused within a =Symbols=; removing a symbol frees its
   space at the next repack.
+- *Ids and the atlas have limits.* Decided 2026-11-21 (user decision).
+  - /The atlas is at most 2048 x 2048/, the largest texture WebGL2
+    promises. An image that can't fit is an error naming it. Space, not
+    ids, bounds the symbols held at once: with their padding, 784 images of
+    64 pixels or 2,601 of 32.
+  - /Ids run out after 65,536 adds to one =Symbols=/: every =add= takes
+    one, a symbol added again at another size included, and =remove=
+    gives none back, so a stale palette can't draw whatever took a removed
+    symbol's place. The limit is nazca's, from the =u16=; the embedder
+    reaches it only by adding and removing over a long session (50 markers
+    added again at each of 40 zoom thresholds take 2,000), and starts a new
+    =Symbols= and writes its palettes again. Vector symbols (step 7) stay
+    sharp at any size and need no adding again.
+  Ruled out: reusing an id once the embedder says no palette names it, an
+  API to call correctly for a limit not likely met; =u32= ids, which no
+  table of 256 x 256 covers.
 - *The images are larger than they are drawn.* The embedder rasterizes at
   the device's pixel ratio, or more for a symbol it will draw at several
   sizes, and gives that as the symbol's scale: image pixels per drawn
@@ -93,8 +131,42 @@ Measured against =src/= at 0.2.1:
   pattern). The GPU samples with linear filtering and mipmaps, so a symbol
   drawn smaller stays smooth. Drawn larger than its pixels divided by its
   scale, it blurs: the embedder adds it again at a larger size, and a
-  palette can be asked which classes draw a symbol past that size, as
-  =Symbol::facets= names faceted curves.
+  palette can be asked which classes draw a symbol past that size
+  (=Palette::blurred=), as =Symbol::facets= names faceted curves.
+- *Mipmaps stop at a quarter.* Decided 2026-11-21 (user decision). The
+  mipmaps are built from the whole atlas, so a level whose texels average
+  across two symbols' slots mixes one symbol's pixels into the other's
+  edge: a faint rim of a neighbour's colour on a marker drawn small.
+  Clamping the lookup to a symbol's rectangle doesn't prevent it, since the
+  texel inside the rectangle already holds the neighbour. So each image has
+  4 transparent pixels of padding, each slot starts on a multiple of 4, and
+  the texture stops at level 2 (=TEXTURE_MAX_LEVEL=): a level-2 texel is an
+  aligned 4 x 4 block, inside one slot or in padding, never across two. A
+  symbol drawn at a quarter of its pixels divided by its scale or larger is
+  smooth; smaller, it samples level 2 sparsely and can shimmer, and the
+  embedder adds it again at a smaller size, as it does for one drawn too
+  large. Padding of 8 and level 3 would hold to an eighth, for slots of
+  about 56% more area than the image (a 64-pixel image in an 80-pixel
+  slot) where 4 costs about 27% (72). Only markers drawn small meet the
+  floor, as on a zoom curve zoomed out; print draws symbols large.
+- *The atlas is premultiplied.* Decided 2026-11-21 (user decision). A
+  symbol arrives with straight alpha, as PNGs, a canvas's =getImageData=
+  and =Style='s colours have it, and its transparent pixels are usually
+  black. Filtering averages each channel on its own, at every mipmap and
+  between texels at full size, so a white edge beside a transparent pixel
+  averages to (0.5, 0.5, 0.5, 0.5): grey at half opacity, a dark rim
+  around a white icon. Premultiplied, the same texel is white at half
+  opacity. So =Symbols= multiplies each pixel's colour by its alpha as it
+  packs the atlas, and the marker and pattern shaders divide by alpha after
+  sampling, so blending stays as it is (straight =SRC_ALPHA=). A =Symbol=
+  keeps the embedder's bytes, which a repack needs anyway, and the SVG
+  writer's PNGs are written from them, exact. Premultiplying in 8 bits
+  coarsens the colour of nearly transparent pixels (at alpha 3/255 a
+  channel keeps 4 levels), which is not seen. A mask uses only its alpha
+  and is unaffected. Ruled out: filling transparent pixels with the nearest
+  visible colour, which fails where two colours meet a transparent area,
+  and asking the embedder for premultiplied pixels, which a canvas doesn't
+  give.
 - *=Style= gains three optional fields*:
   - =marker: Option<Marker>=: a =SymbolId=, a rotation in degrees, and
     whether that rotation is against the map (turns as the camera turns)
@@ -116,15 +188,35 @@ Measured against =src/= at 0.2.1:
   a field added later breaks no one. =Dash::new= takes a slice and refuses
   more than eight lengths or a negative one, so its count and its lengths
   can't disagree.
-- *The palette texture grows rows*, from 256 x 3 to 256 x 6: a marker row
+- *The palette texture grows rows*, from 256 x 3 to 256 x 7 (the proposal
+  said 6, miscounting these four new rows): a marker row
   (id, rotation, alignment), two dash rows (eight lengths), and a pattern
   row (id, repeat size, and the dash phase and dash count in its last two
   channels). Restyling is still one upload; a class's marker or dash
-  changes with no mesh touched.
+  changes with no mesh touched. An id is written as id + 1, so 0 is no
+  marker or no pattern and a class left at =Style::default()= is all zeros
+  and draws nothing, as now; an =f32= holds every =u16= exactly.
 - *=GpuSymbols= is the atlas on the GPU*: an =RGBA8= texture with mipmaps,
   and an =RGBA32F= table of each id's rectangle in it. Adding a symbol
   re-uploads both. A palette names symbols by id, not by rectangle, so a
-  repack touches no palette and no mesh.
+  repack touches no palette and no mesh. The table holds 256 ids a row, id
+  /n/ in row /n/ / 256, as two texels: its rectangle, then its anchor and
+  kind, which the marker shader needs as well. So it is 512 wide and only
+  as tall as the highest id's row: a row of 8 KB for a few hundred ids,
+  2 MB at most, and never past WebGL2's texture limit as a row of 65,536
+  would be.
+- *The renderer holds the atlas.* Decided 2026-11-21 (user decision).
+  =Renderer::set_symbols(gl, &Symbols)= uploads it, after the embedder adds
+  or removes symbols, and every draw and pick uses it with no argument of
+  its own; a renderer starts with an empty atlas, so an embedder without
+  symbols calls nothing. It is how =SvgWriter::symbols= works (§ SVG
+  output). One atlas a renderer: two maps sharing a GL context share one
+  =Symbols=. =GpuSymbols= (built in step 1, unreleased) becomes the
+  renderer's own. Ruled out: a =&GpuSymbols= argument on every draw, which
+  grows four signatures and makes an embedder without symbols upload an
+  empty atlas to pass; and a palette uploaded with its atlas, which would
+  hold copies of the atlas's GL names, so a palette outliving its atlas
+  could sample whatever texture GL gave those names next.
 
 Ruled out:
 - *Symbols in the palette itself.* A class would carry its own pixels, so
@@ -146,22 +238,49 @@ Ruled out:
   by the class's marker row: a class with no marker keeps today's dot
   path, so a layer mixing dots and markers is still one draw.
 - *Picking follows the image*: a pick fragment is kept where the sampled
-  alpha passes a threshold, so a click on the transparent corner of a pin
-  picks what lies under it. Through a state, as =Picker::draw_state= does
+  alpha is at least 0.5, the middle of an antialiased edge, so a click on
+  the transparent corner of a pin picks what lies under it. Through a state, as =Picker::draw_state= does
   now.
 - *Tile edges*: a marker drawn by one tile is cut at that tile's edge, and
   the neighbour draws the rest from its own copy of the point. So a marker
   is whole only when its reach is within the guard band and the
   neighbour's source holds the point too. Nazca checks the first: a
   palette whose markers reach past the guard band is an error naming the
-  class and the size. The reach is measured from the anchor, not the
+  class and the size, from a check the embedder calls (below). The reach is measured from the anchor, not the
   centre, and at the marker's worst rotation: a pin anchored at its tip
-  reaches its whole height above the point, and a marker that turns with
-  the map reaches as far as its anchor's farthest corner in every
-  direction (half the diagonal, about 0.71 of the size, for a square
-  anchored at its centre). A marker rotated against the screen has one
-  rotation, and is checked at it. The second is the embedder's, as it is
+  reaches its whole height above the point. Tile edges are the map's, so a
+  marker rotated against the map keeps one rotation against them, and is
+  checked along them at it; a marker upright on the screen turns against
+  them as the camera turns, and reaches as far as its anchor's farthest
+  corner in every direction (half the diagonal, about 0.71 of the size, for
+  a square anchored at its centre). (The proposal had the two the other way
+  round; corrected when built.) The second is the embedder's, as it is
   for lines now, and the README says so.
+- *The check is against half the guard band.* Decided 2026-11-21 (user
+  decision). The guard band is in the tile's own pixels, and the flat
+  selector shows a level's tiles from their own size down to half of it
+  just before the next coarser level takes over (=level_for_resolution=),
+  while a marker's size is in screen pixels and doesn't shrink. So a
+  32-pixel guard band is 16 on screen over half the zoom range, and a
+  marker reaching further is cut at some zooms. Checked against half, a
+  marker is whole at every zoom. With the default =guard_px= of 32 that
+  allows a marker upright and centred up to 32 pixels, one turning with the
+  map up to 22, and a pin anchored at its tip 16 tall; the error names the
+  class, its size and the =guard_px= it needs, and an embedder wanting
+  larger markers raises =guard_px= in its own =Detail=. The default stays,
+  so a map without markers keeps no more geometry. Ruled out: raising the
+  default, which costs every embedder clipped geometry past each tile's
+  edge, unmeasured; and checking against the whole guard band, which cuts
+  markers over half the zoom range.
+- *The embedder calls the check.* Decided 2026-11-21 (user decision).
+  =Palette::check_reach(&Symbols, guard_px)= returns the error, standard
+  library only, as =Palette::blurred= answers its question: it is the one
+  place that sees the palette's sizes, the symbols' shapes and anchors, and
+  the guard band together. An embedder that doesn't call it gets cut
+  markers, not an error; the spike and the README call it. Ruled out:
+  checking at palette upload, which can't check a palette uploaded before
+  the symbols it names, needs the smallest =guard_px= of every layer the
+  palette styles, and gives every embedder's =update_palette= a =Result=.
 - *No decluttering.* Markers overlap where their points do, drawn in
   feature order. Hiding markers that collide is the placement problem of
   plans/rendering.org § LABELS and belongs with it.
@@ -173,13 +292,54 @@ Ruled out:
   so the phase follows the geometry the embedder handed in rather than
   restarting at nazca's own clip. =Mesh= becomes =#[non_exhaustive]= with
   it, as only =MeshBuilder= builds one. A segment instance carries its
-  start's distance (=SEGMENT_BYTES= 24 to 28). The shader gets the rest
-  from the segment's length.
+  start's distance (=SEGMENT_BYTES= 24 to 28, 36 with a shared border's
+  partner, below, and 40 with a run's base, below that). The shader gets the rest from the segment's
+  length.
+- *Far along a line, a run shares a base.* A vertex 1,000 km along its line
+  is millions of pixels along at a deep level, past what an =f32= holds to
+  a pixel, so each vertex's phase would jitter (§ CHECKS, /A far line
+  start/). =Mesh::distances= are =f64=, and the upload splits them: a run
+  of segments, each starting where the last ended with its distance rising,
+  shares a base, its first distance as an =f32=, and each segment carries
+  its offset from it (=SEGMENT_BYTES= 40). =LINE_VS= reduces the base's
+  pixels modulo the pattern before adding the offset's, so the run loses
+  its phase by one error, the same at each vertex: a jump where the run
+  meets the next, with no jitter between. The run is found at upload, not
+  stored in =Mesh=: a clipped line's re-entry and a ring's closing edge,
+  where its distance falls back to 0, each start one. The SVG writer
+  reads the =f64= distance and needs no split.
+- *Clipped rings carry their distances through clipping.* Lines are
+  clipped a segment at a time (=end_line_run=) and take the distance at
+  each cut by interpolation. A ring is rebuilt by Sutherland--Hodgman
+  (=clip_ring=), so each point carries its distance as a third coordinate
+  through the four passes, interpolated at each intersection. An
+  intersection on the ring's closing edge interpolates towards the ring's
+  length, not towards 0. A vertex's distance need only be right for the
+  edge leaving it: edges along the clip boundary are not outlined, so
+  theirs are never read.
 - *=MeshBuilder::set_line_start(distance)=*, in map units, before a
   feature: where its first vertex lies along the whole line. An embedder
   whose tiles hold pieces of longer lines passes each piece's offset, and
-  dashes run on across tile edges without a seam. Without it each piece
-  starts at 0.
+  dashes run on across tile edges. Without it each piece starts at 0. The
+  seam is only as close as the embedder's start is to nazca's own measure,
+  which runs along the line as snapped and decimated at the tile's level:
+  snapping drops the wiggles finer than its grid and moves every vertex,
+  so on a line of many short segments the measured length parts from the
+  source's at every zoom, not only low ones, and the seam jumps by the
+  difference (§ CHECKS, measured 2026-11-23: 12 to 181 pixels). So
+  =MeshBuilder::line_length(xy)= measures a piece as nazca does, snapped to
+  the builder's grid and decimated as =points= takes it, in map units; the
+  pieces before, measured so and summed, start the next exactly (decided
+  2026-11-23, user decision; built 2026-11-23). On =MeshBuilder= rather
+  than =TileGrid=, since a layout's builder (=for_view=) has a grid no
+  =TileGrid= level names; the grid is fixed in map units for a level, so a
+  builder for any tile at the level measures alike, and an embedder
+  measures each piece once a level. Measuring the source's own geometry instead
+  would stretch each dash by the line's simplification and part the screen
+  from SVG output, whose =stroke-dasharray= dashes the path as drawn. A
+  feature handed whole to every tile needs no start: each tile at a level
+  measures it from the same start along the same grid, and they agree
+  exactly. The README says so.
 - *=LINE_FS= dashes in pixels.* From the segment's start distance, the
   fragment's position along the segment and the zoom, it finds the
   distance to the nearest /on/ interval of the pattern and keeps what lies
@@ -197,17 +357,74 @@ Ruled out:
 - *Picking ignores dashes*: a click in a gap still picks the line. A gap
   is a few pixels, and a line that can't be clicked between its dashes is
   harder to use than one that can.
+- *A shared border is drawn once, by the last feature to outline it*
+  (§ OPEN QUESTIONS 9). Two polygons each outline the border they share,
+  running it opposite ways from their own ring starts, so dashed it would
+  be two patterns out of phase, garbled at any opacity; undashed and
+  translucent, it blends twice (plans/rendering.org § BACKENDS, its known
+  limits).
+  - /Matched by overlap/: =MeshBuilder::finish= finds ring edges that
+    overlap along one grid line, exact on the integer grid where
+    neighbours already snap alike, and splits each at the other's ends, so
+    the pieces of two rings pair one to one. Not by equal ends: a county's
+    one straight edge often meets two neighbours' at a T-junction, and
+    decimation drops a junction collinear in one ring but not the other.
+  - /Both copies stay; the earlier is suppressed/: the earlier copy of a
+    pair, in feed order, carries its partner's feature id and class, and
+    the vertex shader collapses its quad, as =STATE= does, where the
+    partner is shown and its class draws a line (a width and an alpha over
+    0, read from the palette at draw time, so restyling touches no mesh).
+    Each copy keeps its own class, phase and feature id: drawn through a
+    state only the earlier feature holds, its own copy draws, in its own
+    style. A pick takes the copy drawn, the last, as it does now. The
+    =SvgWriter= applies the same rule.
+  - /Classes don't matter/: two classes share a border whatever their
+    dashes, widths or colours, the last drawn showing. A thick outline fed
+    before a thin neighbour loses the stretches they share: drawing
+    emphasis last, fed last or as a state layer, is the embedder's
+    responsibility, and the README says so.
+  - /Phase/: a piece's dashes come from the copy drawn, its ring's
+    distance on the whole snapped ring, the same in every tile at a level.
+    The pattern jumps only where the copy drawn changes, at a junction.
+  - /Tiles agree when fed alike/: "last" is the order a tile was fed, so
+    every tile is fed its features in one order, as which of two outlines
+    shows on a border already needs.
+  - /Pre-clipped sources/ (MVT) start a ring where the source cut it, so
+    the phase restarts in each tile, as lines without starts do.
 
 *** Pattern fills
 - *=FILL_FS= samples a pattern* where the class has one: the repeat is
   anchored to the map and sized in pixels, so it doesn't swim as the map
-  pans and keeps its size at every zoom. The anchor is the grid's origin,
-  taken off each tile's origin in =f64= on the CPU and passed as a uniform
-  with the tile's matrix, so the repeat has no seam between tiles and keeps
-  its precision at deep zooms.
+  pans and keeps its size at every zoom. A repeat is the symbol's box, its
+  longest side =repeat=, laid along the map's axes, so it turns with the
+  map, with a repeat's top left corner at the map's origin. Built
+  2026-11-24 otherwise than proposed: the proposal took a grid origin off
+  each tile's origin and passed it with the tile's matrix. The shader
+  instead finds the repeat from the fragment's pixel (=gl_FragCoord=),
+  turned onto the map's axes, plus where the screen's centre lies in the
+  class's repeat, reduced in =f64= on the CPU for each draw
+  (=style::pattern_phase=, an =f32= pair a class in a 128 =vec4= uniform
+  array). So no tile's coordinates enter it: tiles meet without a seam,
+  and a stand-in ancestor, whose coordinates are coarse at a deep zoom,
+  draws it as finely. A per-tile offset couldn't be reduced once for all
+  classes, each repeat being its own size; reduced in the shader, the
+  centre's distance from the origin, 10^8 pixels at street level, is past
+  what an =f32= holds. The renderer therefore keeps each palette's
+  patterned classes and each symbol's size on the CPU, and
+  =update_palette= takes =&mut GpuPalette=, one more break for 0.3.0's
+  notes.
 - *The wrap has no seam either*: the shader picks the mipmap from the
   unwrapped coordinate (=textureGrad=), since the wrapped one jumps at
-  each repeat edge and would pick the smallest mipmap along it.
+  each repeat edge and would pick the smallest mipmap along it. Its
+  gradient is worked out rather than taken by =dFdx=, which the branches
+  before it leave undefined. A sample is clamped to the middle of the
+  symbol's edge texels at the coarser of the two levels blended, so a
+  repeat's edge takes nothing from the atlas's transparent padding. The
+  cost: the wrap is a hard edge, not filtered across, invisible for a
+  symbol drawn to tile.
+- *Colour and alpha* as for a marker: a mask takes the fill's colour, a
+  colour pattern's alpha is multiplied by the fill's. A symbol not held,
+  or a repeat that isn't a positive number, draws nothing.
 - *Picking ignores the pattern*: a fill picks wherever it covers, as a
   fill that draws nothing picks now.
 
@@ -297,32 +514,51 @@ It also lets an embedder build symbols from data rather than images.
     uploads images, and a =point_size= on a zoom curve rasterizes again as
     the camera zooms unless sizes are bucketed.
 
-Not in the first release: the pixel route draws these symbols already (an
-embedder rasterizes them, or uses =Symbol::from_svg=), and this kind is
-worth its parser and instancing once a symbol has to stay sharp past the
-size it was drawn at, or is built from data.
+Written as not in the first release: the pixel route draws these symbols
+already (an embedder rasterizes them, or uses =Symbol::from_svg=), and this
+kind is worth its parser and instancing once a symbol has to stay sharp
+past the size it was drawn at, or is built from data. Decided 2026-11-25
+(user decision): in 0.3.0, before it merges.
 
 *** SVG output
 - *=SvgWriter::symbols(&Symbols)=* before the layers that use them. Each
-  symbol used is written once, in =<defs>=: as its SVG markup in a
-  =<symbol>= when it has some, or else as its pixels in an =<image>= with a
-  PNG data URL (written by a small encoder in the module: stored, not
-  compressed, so it needs no dependency).
+  symbol used is written once, in =<defs>=, filling the box of its pixels,
+  so the =<use>= that places it is the same either way: as its markup when
+  =Symbol::from_svg= built it, wrapped in an =<svg>= of the pixels' width
+  and height whose =viewBox= is =usvg='s size, or else as its pixels in an
+  =<image>= with a PNG data URL (written by a small encoder in the module:
+  stored, not compressed, so it needs no dependency).
 - *Markers* are =<use>= elements with the symbol's position, size and
   rotation. A mask marker is the class's colour through a =<mask>= of the
-  symbol (=mask-type: alpha=).
+  symbol (=mask-type: alpha=). Built: a mask's PNG is written white with
+  its alpha, so a viewer that reads masks by luminance, without
+  =mask-type=, sees the same mask.
 - *Patterns* are a =<pattern>= per class, in user space, with the same
   anchor and repeat as on screen, holding a =<use>= of the symbol, tinted
-  the same way. The class's CSS fill names it.
+  the same way. The class's CSS fill names it. Built 2026-11-24: the repeat
+  written is the one holding the camera's centre, so its numbers stay
+  small far from the origin, placed by =patternTransform= (translate,
+  rotate by the bearing, scale); a mask's is a =<rect>= of the fill through
+  the symbol's =<mask>=.
 - *Dashes* are =stroke-dasharray= and =stroke-dashoffset=. SVG restarts a
   dash pattern at each subpath, so a chain whose line starts part-way
   through the pattern is a =<path>= of its own with its own offset, and only
-  chains that start at the pattern's start share the class's one path. The
-  cost: where two such paths meet, a translucent dashed line blends twice,
-  which one path per class exists to avoid.
-- *Markup is written as it is handed in.* Whether it is safe to put in a
-  document is the embedder's question, as nazca can't know where the
-  document goes. § OPEN QUESTIONS 1 has an option that answers it.
+  chains that start at the pattern's start share the class's one path.
+  Drawn tile by tile, a layer's lines would overlap across the whole guard
+  band, a translucent dashed line blending twice along it in two paths, so
+  each segment is written clipped to its tile's own area, half open, as a
+  point is. A dash cut at a tile edge is then two capped halves whose
+  union looks whole; only a translucent dash blends twice under the caps,
+  as at any join. A shared border's earlier copy is left out as on screen
+  (§ Dashes).
+- *Markup comes only from =usvg=* (§ OPEN QUESTIONS 8): one root of a
+  known size and no prolog, no =<style>=, no scripts or external
+  references, and its ids prefixed (=WriteOptions::id_prefix=) by a hash of
+  the markup, so two symbols' ids can't meet unless their content is the
+  same. A mask's markup is parsed with =Options::style_sheet= setting
+  =color: white=, so an icon painted in =currentColor= masks the same by
+  luminance as by alpha; one painted in literal colours relies on
+  =mask-type: alpha=.
 
 Ruled out:
 - *Markers as =<image>= only*, from the atlas's pixels. Every marker in a
@@ -343,7 +579,8 @@ Ruled out:
 ** OPEN QUESTIONS
 1. *Where SVG becomes pixels.* Decided 2026-11-19 (user decision): A, with
    B as an optional feature over it, both in 0.3.0.
-   - A. The embedder hands in pixels, and optionally markup. The default
+   - A. The embedder hands in pixels, and optionally markup (narrowed by
+     § OPEN QUESTIONS 8: markup only through B). The default
      build stays standard-library only. In a browser the embedder has an SVG
      renderer at hand (an =<img>= and a canvas); natively it needs its own.
    - B. A =symbols= feature (=resvg=, =usvg=, =tiny-skia=; pure Rust, builds
@@ -354,6 +591,19 @@ Ruled out:
      the parsed tree: no scripts, no external references, so it answers the
      safety question too. =tiny-skia= is already the planned =raster=
      feature's dependency (project.org § DEPENDENCY POLICY).
+   Confirmed 2026-11-25 (user decision), with B built and its cost measured
+   (§ CHECKS, /Cost/): an embedder should be able to use any static SVG as
+   a symbol, so B stays =resvg=, with =raster-images= on, so an icon
+   embedding a JPEG, GIF or WebP isn't refused. Its few hundred KB of wasm,
+   compressed and cached, are paid only by an embedder that enables the
+   feature. Text stays out until nazca has fonts (plans/rendering.org
+   § LABELS). Ruled out: a hand-written subset of SVG in place of =resvg=,
+   far smaller but refusing what exported icons commonly use (clip paths,
+   masks, gradients, =<style>=); refusing embedded JPEG, GIF and WebP to
+   drop =raster-images=. Left as a possible later addition, not planned: a
+   =usvg=-only feature for browser embedders, which rasterize =usvg='s
+   rewrite themselves and hand back its pixels, at about a third of the
+   cost.
 2. *Mask and colour kinds.* Decided 2026-11-19 (user decision): both. Masks
    give one symbol many colours through the palette; colour symbols are
    what most icon sets are.
@@ -370,6 +620,10 @@ Ruled out:
    added later would otherwise mean preparing every tile again. To measure
    in step 3; an opt-out could follow without breaking anything, where
    making them opt-in later would change how every embedder prepares.
+   Measured 2026-11-25 (§ CHECKS, /Cost/): no time to speak of, a quarter
+   of a line mesh on the CPU and a seventh on the GPU, as estimated. No
+   opt-out for 0.3.0; one can follow if a large line layer needs the
+   memory.
 5. *What =point_size= means for a marker.* Decided 2026-11-19 (user
    decision): its longest side, so a marker fits the same box whatever its
    shape. The alternative, its height, suits pins and labels but makes a
@@ -385,7 +639,11 @@ Ruled out:
    in 0.2.1, and 1.0 would need the switch anyway. Made now, the break
    happens once. Fields stay public, readable and writable; only literals
    and exhaustive patterns go, so an embedder builds from =default()= or
-   =new= and assigns.
+   =new= and assigns. Two exceptions, where fields must agree: a =Dash='s
+   lengths are read through =Dash::lengths=, so its count can't disagree
+   with them, and a =Symbol='s size and pixels through accessors, checked
+   by =Symbol::new=. Built, clippy's =field_reassign_with_default= doesn't
+   fire on that pattern in an embedder's crate.
 7. *Antialiasing vector symbols* (§ Later: vector symbols).
    Narrowed 2026-11-19 (user decision): not multisampling, which smooths
    every edge at once but costs memory and fill rate on every frame, was
@@ -393,62 +651,262 @@ Ruled out:
    framebuffer, not nazca's, to choose. Between a feathered outline drawn
    outside the fill and rasterizing into the atlas, open until step 7's
    spike measures both (§ CHECKS).
+8. *Markup handed in by the embedder.* Decided 2026-11-22 (user decision):
+   markup only from =Symbol::from_svg=, so =Symbol= has no public markup
+   field, and a symbol without the =symbols= feature is written as a PNG.
+   Written as it is handed in, markup breaks the document in ways nazca
+   can't see without parsing it, the parser step 7 keeps to path data:
+   - /Fitting/: an icon's root has its own =width=, =height= and
+     =viewBox=; written into the pixels' box it draws at its own size, and
+     at another aspect it is letterboxed and its anchor drifts from the
+     screen's.
+   - /A whole document/: a file's =<?xml?>= or =<!DOCTYPE>= is invalid
+     inside another, and one unbalanced tag breaks every symbol, not its
+     own.
+   - /Ids/: exported icons are full of =id="a"=; two symbols with the same
+     id draw the first one's gradient or clip in both, silently.
+   - /=<style>=/: an exporter's =.cls-1= reaches every icon in the
+     document.
+   - /Masks/: a mask's PNG is written white so a viewer reading masks by
+     luminance agrees; markup in its own colours can't be.
+   - /Agreement/: markup and pixels handed in apart can differ in version,
+     crop or padding, and the SVG then doesn't match the screen.
+   =usvg='s rewrite settles all six (§ SVG output). Ruled out: a contract
+   for hand-made markup, which nazca can't check and which fails silently;
+   and no markup until step 7, which writes every marker in a vector layout
+   as a bitmap until then. Left until a viewer needs it: a
+   =feColorMatrix= turning a mask's markup white, for icons in literal
+   colours where =mask-type= isn't read; some PDF and print converters
+   rasterize filters.
+9. *Shared borders* (§ Dashes). Decided 2026-11-22 (user decision): a
+   border two polygons share is drawn once, by the last feature fed that
+   outlines it, always, whatever the two classes' dashes, widths or
+   colours; drawing emphatic features last is the embedder's
+   responsibility. Ruled out: only when either class is dashed, which
+   leaves undashed translucent borders blending twice; keeping the lower
+   feature id's copy, which picks a different feature than a click does
+   now; arcs between junctions measured from a fixed end (as TopoJSON
+   stores them), whose ends depend on which polygons a tile holds, so
+   neighbouring tiles disagree at the seam; keeping both copies with one
+   phase copied onto the other, which still blends twice; and a phase from
+   map position, which can't run on along a line and restarts at every
+   vertex.
 
 ** STEPS
+0. *Nazca's own GL context* (plans/gl-context.org § STEP 1), first, so the
+   =gl= code below takes =&gl::Context= from the start. It breaks every =gl=
+   signature, and 0.3.0 breaks anyway (§ OPEN QUESTIONS 6), so the two
+   breaks ship as one.
 1. *Symbols and the palette.* The =symbol= module (=Symbol=, =Symbols=,
    shelf packing, =SymbolId=), =Style='s three fields, =#[non_exhaustive]=
-   on =Style= and the new types, the 256 x 6 palette, =GpuSymbols=. Nothing
-   draws them yet; existing draws are unchanged. Docs: =style.rs= and
+   on =Style= and the new types, the 256 x 7 palette, =GpuSymbols=. Nothing
+   draws them yet; existing draws are unchanged. Built 2026-11-21. Docs: =style.rs= and
    =symbol.rs= module docs, plans/rendering.org § STYLING.
 2. *Markers*: the marker program and its four forms, picking by alpha, the
    guard band check, =<use>= and =<mask>= in SVG. Docs: =gl.rs= and
-   =svg.rs= module docs.
-3. *Dashes*: =Mesh::distances= and =set_line_start=, the segment instance,
-   =LINE_FS='s dash test, =stroke-dasharray= in SVG.
+   =svg.rs= module docs. Built 2026-11-21, with the renderer holding the
+   atlas (=Renderer::set_symbols=), =Palette::check_reach=, and points
+   written once in SVG; markup moved to step 5 (§ OPEN QUESTIONS 8).
+3. *Dashes*: =Mesh::distances= and =set_line_start=, distances through
+   ring clipping, shared borders matched and the earlier copy suppressed
+   (§ OPEN QUESTIONS 9), first, then the segment instance, =LINE_FS='s dash
+   test, =stroke-dasharray= in SVG with lines clipped to the tile's own
+   area. =Mesh= becomes =#[non_exhaustive]=, so the spike's =Mesh= struct
+   literal (=examples/spike/tiles.rs=) builds through a constructor or
+   =MeshBuilder=. Docs: =prepare.rs=, =gl.rs= and =svg.rs= module docs,
+   the known limits in plans/rendering.org § BACKENDS (a shared border no
+   longer outlined twice). Built 2026-11-23, with the dash check
+   (=--check-dashes=, X in the browser) and the counties' outlines dashed,
+   dotted and translucent (=--outlines=, D); checked natively and in
+   Chrome's WebGL2. Its two additions built 2026-11-23, the same way:
+   =Mesh::distances= as =f64= with a run's base in the segment instance
+   (=SEGMENT_BYTES= 40), and =MeshBuilder::line_length=; the dash check
+   gained the pan, the seams measured by =line_length= and the far line's
+   phase at a fractional zoom.
 4. *Pattern fills*: the anchor uniform, =FILL_FS='s pattern sample,
-   =<pattern>= in SVG.
-5. *=Symbol::from_svg=* behind the =symbols= feature (§ OPEN QUESTIONS 1).
-6. *The README* (a section on symbols: kinds, sizes, the guard band rule,
-   how round ends lengthen dashes, what SVG output writes; its palette
-   example built from =Style::default()= by assignment) and *a release*,
-   0.3.0 as § OPEN QUESTIONS 6 says.
+   =<pattern>= in SVG. Built 2026-11-24, the anchor as the screen centre's
+   place in each class's repeat (§ Pattern fills), with the pattern check
+   (=--check-patterns=, T in the browser) and a hatch or stipple over the
+   counties (=--patterns=, P); checked natively and in Chrome's WebGL2.
+5. *=Symbol::from_svg=* behind the =symbols= feature (§ OPEN QUESTIONS 1),
+   and the SVG writer's =<defs>= writing its markup, wrapped to the
+   pixels' box, its ids prefixed, a mask's =currentColor= white
+   (§ OPEN QUESTIONS 8). Built 2026-11-24 as
+   =Symbol::from_svg(markup, size, scale, kind)=: =size= the longest side
+   in drawn pixels, as =point_size= is, and =kind= an argument, since it
+   decides what =currentColor= paints (white for a mask, black otherwise),
+   so the pixels and the markup come from one tree whatever the kind. Ids
+   are prefixed by an FNV-1a hash of =usvg='s unprefixed rewrite, fixed
+   across Rust versions as =std='s hash is not. =usvg= is a dependency of
+   its own for its writer, which =resvg= leaves off; =resvg='s
+   =raster-images= is on, so a JPEG, GIF or WebP an icon embeds draws on
+   screen as in its markup (§ CHECKS, /Cost/, for what that costs). The
+   spike gains a third look of markers, M or =--markers markup=: the pin
+   and a badge with a gradient from markup, and needs the =symbols=
+   feature.
+6. *The README* (a section on symbols: kinds, sizes and the quarter floor
+   on drawing them small, the guard band rule, how round ends lengthen
+   dashes, a line handed in as pieces started by =line_length=, the
+   =symbols= feature's =Symbol::from_svg= and what it costs a wasm build,
+   what SVG output writes; its palette
+   example built from =Style::default()= by assignment; its setup building
+   a =gl::Context= in place of a =glow= one) and *a release*, 0.3.0 as
+   § OPEN QUESTIONS 6 says, its notes covering both breaks. The README
+   written 2026-11-25, its three examples type-checked against the API, and
+   the version set to 0.3.0.
 7. *Later, vector symbols*: parts from path data (the parser and
    flattening) and from a =Sink=, literal and slot paint, the instanced
    symbol mesh, picking by shape, the caps, the antialiased edge as § OPEN
-   QUESTIONS 7 settles, =<symbol>= output per class. A release of its own.
+   QUESTIONS 7 settles, =<symbol>= output per class. In 0.3.0, decided
+   2026-11-25 (user decision), where it was a release of its own.
 
 ** CHECKS
 - *Packing*: unit tests in =symbol.rs=. Ids stay stable across adds and a
-  repack; rectangles never overlap and keep their padding; an image larger
-  than the atlas is an error naming it.
+  repack; rectangles never overlap, keep their padding of 4 and start on a
+  multiple of 4; an image larger than the atlas is an error naming it, and
+  an add past the last id is an error too. The atlas holds each pixel
+  premultiplied and the =Symbol= its bytes as handed in.
 - *The spike*, natively and in Chrome's WebGL2, a key and flag for each:
-  - /Markers/: the county centroids as a colour marker and as a mask in
+  - /Markers/ (run 2026-11-21, natively and in Chrome's WebGL2;
+    =--check-markers=, K in the browser, M to cycle): the county centroids
+    as a colour marker and as a mask in
     three classes' colours, rotated against the map and against the screen
     while the camera turns. A marker over a tile edge is whole at every
     zoom, and so is a pin anchored at its tip and turning with the map; a
     palette whose pin reaches past the guard band only when turned is
     refused. A click on its transparent corner picks the county under it.
-  - /Dashes/: county outlines dashed and dotted. The pattern runs on
-    across tile edges when the spike passes line starts, and restarts
-    without them; it doesn't crawl as the map pans.
+    A marker packed beside one of a contrasting colour, drawn at a quarter
+    of its pixels, shows no rim of its neighbour's colour, and a white
+    colour marker on transparent pixels stored black shows no grey rim at
+    that size or at full size between pixels.
+  - /Dashes/ (run 2026-11-23, natively and in Chrome's WebGL2, with the
+    same results):
+    county outlines dashed and dotted, each shared border one
+    pattern, not two out of phase, and a hovered county's dashed outline
+    whole through a state. A translucent undashed outline no darker on a
+    shared border than elsewhere; a T-junction on a straight border
+    matched. The spike has no lines, so a synthetic one, cut into pieces
+    with starts: the pattern runs on across tile edges, the jump at each
+    seam measured, not assumed 0, at a low zoom on a wiggly line; without
+    starts it restarts. It doesn't crawl as the map pans. Run:
+    three rectangles meeting at a T-junction, read back: a translucent
+    outline the same blue (128) on shared borders and borders of one; a
+    dash pattern covering 0.60 of each; panned 37 by 23 pixels, the
+    dashed rectangles the first frame shifted, no channel off by more than
+    1 natively and 0 in Chrome (run 2026-11-23, and failing at 2,441
+    pixels with the phase tied to the screen); each rectangle whole through a
+    state, and the wide one's border drawn when the narrow ones' class
+    has no line; a dashed line in two tiles' pieces matching it whole at
+    every pixel with its start, and differing at 105 of 340 without. Each
+    of these fails when the shader is broken on purpose: no suppression,
+    suppression blind to the state or to the partner's line, no dash test,
+    dashes blind to the distance or to its scale. The counties' screenshots
+    dashed, dotted and translucent, and a hovered county's dashed outline,
+    whole; its SVG the same in WebKit. The darker dots at a translucent
+    line's vertices remain (plans/rendering.org § BACKENDS). Line starts
+    measured on the source's geometry: Barnstable's coast in the fixture,
+    48 vertices, misses by under 1 pixel at z6 to z16; a 20 km line
+    wiggling 5 m every 10 m by 12 to 181 pixels at z8 to z18, both ways,
+    since snapping a regular wiggle lengthens it as much as dropping one
+    shortens it. So a start the embedder measures itself joins only on
+    lines of few, long segments; one measured as nazca measures, on the
+    level's own grid, would join exactly. Decided 2026-11-23 (user
+    decision): add that function, before step 4. Built 2026-11-23,
+    =MeshBuilder::line_length=, and run natively: both lines' pieces
+    measured by it in the tile where the first piece starts, not the
+    seam's, jump 0.0 pixels at every level (the check fails past 0.01),
+    beside the source-measured jumps above. A unit test cuts a wiggly line
+    into three pieces measured by the next tile over and gets the whole
+    line's distances. The same report in Chrome's WebGL2 (2026-11-23),
+    the two tiles' pieces of the dashed line again matching it whole at
+    every pixel through the new segment layout.
   - /A far line start/: an =f32= distance loses the phase by about the
     distance in pixels times 6 x 10^-8 at each vertex: 0.2 pixels for a
     piece 1,000 km along its line at z18, 4 pixels for 5,000 km at z20. A
     long line with a large start, at the grid's deepest level, shows
-    whether the jump is seen; if it is, the start travels as two =f32=.
+    whether the jitter is seen. If it is, two =f32= won't cure it: the
+    shader's product of the distance and the scale loses as much again.
+    The cure is a base a run of segments shares and an offset from it
+    (=SEGMENT_BYTES= 4 more): the run then carries one error, a jump at its
+    seam, with no jitter between its vertices. Measured 2026-11-23, as the
+    shader multiplies in =f32=, at z20: 1,000 km along, the phase off by up
+    to 0.50 pixels and 0.84 between neighbouring vertices; 5,000 km, 2.00
+    and 3.16. Decided 2026-11-23 (user decision): build the cure, before
+    step 4. Built 2026-11-23 (§ Dashes, /Far along a line/) and measured
+    again natively, as the shader multiplies and adds: 0.00 pixels between
+    neighbouring vertices at 1,000 and 5,000 km, at zoom 20 and 20.4. At
+    zoom 20 a local unit is 256 pixels, which the base multiplies by
+    exactly, so the phase is off by 0.00; at 20.4 the scale rounds, off by
+    0.99 at 1,000 km and 0.35 at 5,000, the same at every vertex of the
+    run, so a jump of about that where it meets the next tile's run. These
+    are worked in =f32= on the CPU as the shader works them, so Chrome's
+    WebGL2 (2026-11-23) repeats them by construction; what it checks is
+    that the shader draws through the new layout, which the dashed line's
+    pieces show.
   - /Patterns/: a hatch over a flat fill (two palettes), anchored to the map
     while panning, with no seam at tile edges or at the repeat, at z2 and
-    z14.
+    z14. Run 2026-11-24 natively (=--check-patterns=), at z2.3, z14.3 and
+    z20.3, north up and turned 30 degrees, on a square over the view: drawn
+    from the level's tiles, from one mesh and from the tiles six levels up
+    standing in, the same picture inside the square; a pattern of four
+    coloured quarters showing at every pixel clear of a quarter's edge
+    (157,500 to 210,150 checked a view) the quarter its map point's own
+    place in its repeat, from the map's origin in =f64=, says; panned 37 by
+    23 pixels, the first frame shifted, no channel off by more than 1, but
+    for pixel centres within 0.02 pixels of a repeat's edge, where the wrap
+    is a hard edge a rounding moves them across (two pixels at z14.3 turned
+    30 degrees); an opaque white pattern at repeats of 40, 10, 5 and 3
+    pixels for a 16-pixel symbol, magnified and on mipmaps 1 and 2 and
+    past, 255 everywhere; a pick in a hatch's gap finds the fill. Each
+    fails when broken on purpose: the inset at the finer level (237 at a
+    repeat's edge), no inset (236), the implicit gradient, the phase
+    reduced in =f32= (fails at z14.3 turned), the phase tied to the screen,
+    Y not flipped. The spike's counties with a hatch turned 20 degrees and
+    a stipple, and the hatch's SVG the same look in WebKit (Quick Look).
+    The same report in Chrome's WebGL2 (2026-11-24): every view passing
+    with the same numbers but the pixels checked (152,557 to 174,104 on its
+    canvas), and P's hatch whole over the 42 tiles of the counties.
 - *SVG*: unit tests in =svg.rs= for each kind: one =<defs>= entry per symbol
   used, =<use>= placement and rotation, a mask's colour, a =<pattern>='s
   anchor and repeat, a dashed chain's offset. The spike's =--svg= and
   =--screenshot= of the same view show the same markers, dashes and hatch.
+- *Markup* (step 5): unit tests in =svg.rs=. A symbol from =from_svg= is
+  written as its markup and one from =Symbol::new= as a PNG, with the same
+  =<use>=; two icons that both define =id="a"= keep their own gradients; a
+  =currentColor= mask icon is white in its =<mask>=; a root at another
+  aspect than its pixels fills their box. The spike's =--svg= of a pin
+  from markup matches its =--screenshot=, in a browser and in =resvg=.
+  Run 2026-11-24: those four, and in =symbol.rs= a symbol's pixels and
+  rewrite from one tree, a prolog, =<style>= (applied), script, file
+  image and text gone from the rewrite, and the refusals. The spike's
+  counties turned 30 degrees with =--markers markup= (the mask pin upright
+  and turning with the map, translucent, and the colour badge, its
+  gradient's id =a= prefixed), its =--svg= against its =--screenshot= at
+  1800 x 1400: in =resvg= 1,006 pixels differ by more than 32 levels, of
+  which 659 do without markers (outline antialiasing) and 1,983 with the
+  pixel pins; in Chrome, drawn to a canvas, 2,952, 2,445 and 2,470. The
+  differences lie on the symbols' edges, as crops show: the screen samples
+  a 3x image through mipmaps where a viewer draws the vector edge; shapes,
+  anchors, turns, colours and the gradient match. In Chrome's WebGL2 M
+  draws the same look, S writes the same markup, the wasm build's prefix
+  the native one's, and K's marker check passes with it on. The spike's
+  views without markup (plain, colour and mask markers, hatch, stipple,
+  dashed) are byte-identical to step 4's in PNG and SVG; the native
+  marker, dash, pattern and state checks pass.
 - *Mask support* in the viewers SVG output is read by: browsers, and a
   rasterizer such as =resvg=. =mask-type: alpha= is the part to check.
+  Checked 2026-11-21 in WebKit (macOS Quick Look): the spike's pins match
+  its screenshot. Checked 2026-11-24 in =resvg= 0.50 and Chrome (§ CHECKS,
+  /Markup/): the pixel pins' PNG masks and the markup pin's white
+  =currentColor= alike.
 - *Points in two guard bands.* Nothing clips the SVG writer's output by
   tile, so a point held by two tiles may be written twice. Invisible for an
   opaque dot; a translucent marker would show it. Check, and if so, write a
-  point only from the tile whose own area holds it.
+  point only from the tile whose own area holds it. Checked when built: it
+  was written twice, and is now written by the tile whose own area holds
+  it, half open so a point on an edge has one tile. The cost: a point just
+  outside every tile drawn, whose marker reaches onto the page, is lost at
+  the page's edge.
 - *Vector symbols* (step 7): unit tests of the parser against every
   command, absolute and relative, and arcs; a single-path pin from a
   public-domain icon set (a filled outer contour with a hole, cubic curves)
@@ -470,4 +928,34 @@ Ruled out:
   time a zoom curve on =point_size= costs the atlas route.
 - *Cost*: a frame of the 2,500-point grid as dots and as markers, and the
   mesh bytes and prepare time of a large line layer with and without
-  distances (§ OPEN QUESTIONS 4).
+  distances (§ OPEN QUESTIONS 4); the counties' prepare time and segment
+  bytes with and without shared borders matched (§ OPEN QUESTIONS 9).
+  Measured 2026-11-23, release, the counties' tiles at z10: feeding 0.3
+  ms, matching (=MeshBuilder::finish=) 0.1 ms; 716 outline segments, 194
+  paired; the partner's 8 bytes a segment are 5 KB of the segments' 25 KB,
+  of 27 KB with the run's base (40 bytes a segment).
+  Markers against dots, measured 2026-11-25 (=--measure-markers=, B in the
+  browser): the 2,500-point grid drawn ten times a frame, a layer each, an
+  empty frame's time taken off, three runs. Natively (1800 x 1400, Apple
+  silicon, GL 4.1 over Metal), a draw costs 0.1 to 0.4 ms at 8 and 24
+  pixels for dots and markers alike; at 64 pixels, where the grid's
+  28-pixel cells overlap and the draw is fill-bound, dots 1.5 ms, mask
+  markers the same, colour markers 2.0 to 2.2 ms. In Chrome's WebGL2 (1494
+  x 1636), 0.2 to 1.2 ms at 8 and 24 pixels with no order the noise
+  doesn't hide; at 64, dots and mask markers 2.1 to 2.3 ms, colour markers
+  3.1 to 3.2. So a marker costs a dot's time but where it is large and
+  overlapping, and there a colour marker costs about 40% more.
+  Line distances, measured 2026-11-25: every US county (3,222, the
+  geocore-local fixture) prepared into Web Mercator tiles at z4, z6 and
+  z8, as polygons and with their rings fed as lines, against the same
+  build with distances taken out of =prepare.rs=. Preparing: polygons the
+  same either way (14.2 and 14.3 ms at z4, 64.3 and 64.5 at z8); lines 0.6
+  to 0.7 ms more (3.2 and 2.5 at z4, 54.4 and 53.7 at z8). Bytes: a
+  quarter of a line mesh on the CPU (509 of 2,001 KB at z4) and a sixth of
+  a polygon mesh (495 of 2,899 KB); on the GPU 8 of a segment's 40 bytes,
+  a seventh of a line mesh with its vertices (472 of about 3,380 KB at z4).
+  The =symbols= feature, measured 2026-11-24 on the browser spike's
+  release wasm: 404 KB, 177 KB gzipped, without it (step 4); 1,042 KB,
+  416 KB gzipped, with =resvg= alone; 1,378 KB, 554 KB gzipped, with its
+  =raster-images= too. An embedder that rasterizes its icons itself pays
+  none of it. =raster-images= stays on (§ OPEN QUESTIONS 1).

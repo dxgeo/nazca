@@ -7,8 +7,9 @@
 //! does. A [`TileGrid`] cuts the map's plane into the tiles it is prepared
 //! and drawn in; a [`Camera`] says which part of the plane is on screen, a
 //! [`TileSelector`] which tiles that needs, and a [`TileCache`] keeps the
-//! prepared ones between frames. A [`Palette`] styles them by class, and a
-//! [`Colormap`] colours [`raster`] bands. The `gl` backend draws them
+//! prepared ones between frames. A [`Palette`] styles them by class, drawing
+//! with the [`Symbols`] it names where a class has a marker or a pattern,
+//! and a [`Colormap`] colours [`raster`] bands. The `gl` backend draws them
 //! interactively and [`svg`] writes layouts; the `mvt` and `mlt` features
 //! decode basemap vector tiles into a [`Sink`].
 //!
@@ -33,6 +34,7 @@ pub mod select;
 pub mod sink;
 pub mod style;
 pub mod svg;
+pub mod symbol;
 pub mod wkb;
 
 pub use cache::{Plan, TileCache, TileKey};
@@ -41,4 +43,5 @@ pub use grid::{TileGrid, TileId};
 pub use prepare::{Detail, Mesh, MeshBuilder};
 pub use select::TileSelector;
 pub use sink::Sink;
-pub use style::{Colormap, Palette, Style};
+pub use style::{Align, Colormap, Dash, Marker, Palette, Pattern, Style};
+pub use symbol::{Symbol, SymbolId, Symbols};
