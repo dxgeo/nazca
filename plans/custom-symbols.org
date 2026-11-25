@@ -587,6 +587,19 @@ Ruled out:
      the parsed tree: no scripts, no external references, so it answers the
      safety question too. =tiny-skia= is already the planned =raster=
      feature's dependency (project.org § DEPENDENCY POLICY).
+   Confirmed 2026-11-25 (user decision), with B built and its cost measured
+   (§ CHECKS, /Cost/): an embedder should be able to use any static SVG as
+   a symbol, so B stays =resvg=, with =raster-images= on, so an icon
+   embedding a JPEG, GIF or WebP isn't refused. Its few hundred KB of wasm,
+   compressed and cached, are paid only by an embedder that enables the
+   feature. Text stays out until nazca has fonts (plans/rendering.org
+   § LABELS). Ruled out: a hand-written subset of SVG in place of =resvg=,
+   far smaller but refusing what exported icons commonly use (clip paths,
+   masks, gradients, =<style>=); refusing embedded JPEG, GIF and WebP to
+   drop =raster-images=. Left as a possible later addition, not planned: a
+   =usvg=-only feature for browser embedders, which rasterize =usvg='s
+   rewrite themselves and hand back its pixels, at about a third of the
+   cost.
 2. *Mask and colour kinds.* Decided 2026-11-19 (user decision): both. Masks
    give one symbol many colours through the palette; colour symbols are
    what most icon sets are.
@@ -914,4 +927,4 @@ Ruled out:
   release wasm: 404 KB, 177 KB gzipped, without it (step 4); 1,042 KB,
   416 KB gzipped, with =resvg= alone; 1,378 KB, 554 KB gzipped, with its
   =raster-images= too. An embedder that rasterizes its icons itself pays
-  none of it; whether =raster-images= stays on is open (../HANDOFF.org).
+  none of it. =raster-images= stays on (§ OPEN QUESTIONS 1).

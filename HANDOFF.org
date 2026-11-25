@@ -47,17 +47,14 @@ unreleased:
   its =--svg= matches its =--screenshot= in =resvg= and in Chrome but for
   the symbols' edges, the same look draws in Chrome's WebGL2, and views
   without markup are byte-identical to step 4's. The spike now needs
-  =--features gl,symbols=.
+  =--features gl,symbols=. Decided 2026-11-25 to stay =resvg=, with
+  =raster-images= on, so any static SVG can be a symbol (§ OPEN QUESTIONS
+  1).
 
 § CHECKS (/Dashes/, /A far line start/, /Patterns/, /Markup/, /Cost/) has
 the runs and numbers.
 
 ** NEXT SESSION
-- *Decide*: keep =resvg='s =raster-images= on? It decodes a JPEG, GIF or
-  WebP an icon embeds, so the screen draws what the markup does; off, such
-  an image is in the SVG output but not on screen. It is 337 KB of the
-  browser spike's wasm (138 KB gzipped) of the feature's 975 KB (377 KB);
-  only an embedder enabling =symbols= pays either (§ CHECKS, /Cost/).
 - *Step 6*: the README's symbols section and the 0.3.0 release
   (§ STEPS 6).
 
